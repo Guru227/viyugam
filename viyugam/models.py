@@ -139,6 +139,7 @@ class ViyugamConfig(BaseModel):
     season:          Optional[SeasonConfig] = None
     dimensions:      list[str]      = [d.value for d in Dimension]
     work_hours_cap:  int            = 8
+    day_start:       int            = 10     # hour (24h) after which plan = mid-day mode
     currency:        str            = "₹"
     timezone:        str            = "Asia/Kolkata"
     api_key:         Optional[str]  = None   # fallback if not in env
@@ -150,6 +151,7 @@ class SystemState(BaseModel):
     resilience:       ResilienceState = ResilienceState.FLOW
     last_active:      Optional[str]   = None   # ISO datetime
     last_log:         Optional[str]   = None   # YYYY-MM-DD
+    last_plan:        Optional[str]   = None   # YYYY-MM-DD
     last_review:      Optional[str]   = None   # YYYY-MM-DD
     last_think:       Optional[str]   = None   # YYYY-MM-DD
     current_streak:   int             = 0

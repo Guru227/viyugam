@@ -85,20 +85,26 @@ def triage_inbox(items: list[str], config_context: str = "") -> list[dict]:
 
 PLAN_SYSTEM = """You are the Chairman — a tactical planning agent for Viyugam, a personal Life OS.
 
-Your job right now: build a realistic, humane daily schedule.
+Your job: build a realistic, humane daily schedule.
 
 Rules:
-1. Use the user's actual energy patterns from their journal entries. Do NOT assume fixed
-   circadian rhythms. If you see patterns (e.g. "always sharp at 11pm"), use them.
-   If there's no journal data yet, default to: morning = deep work, afternoon = shallow,
-   evening = light/admin.
+1. Use the user's actual energy patterns from journal entries. Do NOT assume fixed circadian
+   rhythms. If no journal data: default to morning = deep work, afternoon = shallow, evening = light.
 2. High energy tasks (cost 7-10) go in peak energy windows.
 3. Low energy tasks (cost 1-4) go in low energy windows.
 4. Insert a 15-minute break after every 90 minutes of focused work.
-5. If tasks exceed available work hours, move the lowest priority / least urgent to backlog.
+5. If tasks exceed available hours, move lowest priority to backlog.
 6. Always schedule habits that are due today.
 7. Be realistic — don't schedule 10 hours of deep work. People need breathing room.
 8. The schedule should feel good to look at, not anxiety-inducing.
+
+PLANNING MODE — read carefully:
+- FULL: Normal full-day plan. Start from day_start hour.
+- MIDDAY: User is starting late or ran plan mid-day for the first time. Schedule ONLY from
+  current_time forward. The catch_up_notes tell you what was already done — do NOT reschedule
+  those. Fewer hours remain, so be selective. Acknowledge the late start briefly in energy_read.
+- REPLAN: Circumstances changed. Schedule ONLY from current_time forward. The catch_up_notes
+  explain what changed — factor this into task ordering and energy. Be pragmatic.
 
 Return ONLY a JSON object, no other text:
 {
@@ -114,7 +120,7 @@ Return ONLY a JSON object, no other text:
     }
   ],
   "moved_to_backlog": ["task_id_1"],
-  "energy_read": "Short note on what you read from journal entries about their energy patterns",
+  "energy_read": "Short note on energy patterns or acknowledgement of late start / changed circumstances",
   "season_note": null
 }
 
@@ -131,16 +137,20 @@ def plan_day(
     config: dict,
     today: str,
     nudges: list[str],
+    current_time: str = "09:00",
+    mode: str = "full",
+    catch_up_notes: str = "",
 ) -> dict:
     """
     Generate a time-blocked daily schedule.
+    mode: "full" | "midday" | "replan"
     Returns structured plan dict.
     """
     journal_context = ""
     if recent_journals:
         journal_context = "RECENT JOURNAL ENTRIES (use these to understand energy patterns):\n"
-        for d, content in recent_journals[:7]:  # last 7 days max
-            journal_context += f"\n--- {d} ---\n{content[:800]}\n"  # cap per entry
+        for d, content in recent_journals[:7]:
+            journal_context += f"\n--- {d} ---\n{content[:800]}\n"
     else:
         journal_context = "No journal entries yet. Use default energy pattern assumptions."
 
@@ -149,12 +159,20 @@ def plan_day(
         s = config["season"]
         season_info = f"Current season: {s.get('name', '')} | Focus: {s.get('focus', '')} | Secondary: {s.get('secondary', '')}"
 
+    catch_up_section = ""
+    if catch_up_notes:
+        label = "ALREADY DONE TODAY" if mode == "midday" else "WHAT CHANGED"
+        catch_up_section = f"\n{label}:\n{catch_up_notes}\n"
+
     user_content = f"""TODAY: {today}
+PLANNING MODE: {mode.upper()}
+CURRENT TIME: {current_time}
+DAY START HOUR: {config.get('day_start', 10):02d}:00
 USER: {config.get('user_name', 'friend')}
 Work hours cap: {config.get('work_hours_cap', 8)}h
 {season_info}
-
-TASKS DUE TODAY OR OVERDUE:
+{catch_up_section}
+TASKS DUE TODAY OR OVERDUE (remaining):
 {json.dumps(tasks, indent=2) if tasks else "None scheduled yet."}
 
 HABITS:

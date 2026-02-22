@@ -156,19 +156,68 @@ def cmd_plan(args: argparse.Namespace) -> None:
     config = storage.load_config()
     today = date.today().isoformat()
 
+    now = datetime.now()
+    current_time = now.strftime("%H:%M")
+    current_hour = now.hour
+    day_start = config.day_start  # default 10
+
+    # ── Determine planning mode ────────────────────────────────────────────────
+    force_replan = getattr(args, "replan", False)
+    already_planned = state.last_plan == today
+
+    if already_planned or force_replan:
+        mode = "replan"
+    elif current_hour >= day_start:
+        mode = "midday"
+    else:
+        mode = "full"
+
+    # ── Mode-specific prompts ──────────────────────────────────────────────────
+    catch_up_notes = ""
+
+    if mode == "midday":
+        done_today = [
+            t for t in storage.get_tasks(status="done")
+            if t.last_done == today or t.scheduled_date == today
+        ]
+        console.print()
+        if done_today:
+            console.print(f"[dim]It's {current_time} — already done today:[/dim]")
+            for t in done_today:
+                console.print(f"  [green]✓[/green] {t.title}")
+            console.print()
+        else:
+            console.print(f"[dim]It's {current_time} — planning the rest of your day.[/dim]\n")
+        catch_up_notes = Prompt.ask(
+            "What did you get done this morning?",
+            default="",
+        )
+        console.print()
+
+    elif mode == "replan":
+        console.print(f"\n[dim]It's {current_time}. Replanning from now.[/dim]\n")
+        catch_up_notes = Prompt.ask(
+            "What changed?  [dim](e.g. meeting ran long, low energy, new priority — Enter for clean replan)[/dim]",
+            default="",
+        )
+        console.print()
+
     # 1. Auto-process inbox
     inbox_items = storage.get_inbox(unprocessed_only=True)
     if inbox_items:
         console.print(f"[dim]Processing {len(inbox_items)} inbox item(s)...[/dim]")
         _process_inbox_items(inbox_items, config)
 
-    # 2. Gather context
+    # 2. Gather context — exclude done tasks for midday/replan
     tasks_today = storage.get_tasks(scheduled_date=today)
     overdue = [
         t for t in storage.get_tasks(status="todo")
         if t.scheduled_date and t.scheduled_date < today and not t.is_habit
     ]
     all_tasks = tasks_today + [t for t in overdue if t not in tasks_today]
+    if mode in ("midday", "replan"):
+        all_tasks = [t for t in all_tasks if t.status != TaskStatus.DONE]
+
     habits = storage.get_habits()
     projects = storage.get_projects(status="active")
     goals = storage.get_goals()
@@ -188,7 +237,12 @@ def cmd_plan(args: argparse.Namespace) -> None:
         return
 
     # 3. Generate schedule
-    with console.status("[dim]Building your schedule...[/dim]"):
+    status_msg = {
+        "full":   "Building your schedule...",
+        "midday": "Planning the rest of your day...",
+        "replan": "Replanning from now...",
+    }[mode]
+    with console.status(f"[dim]{status_msg}[/dim]"):
         plan = plan_day(
             tasks=[t.model_dump() for t in all_tasks],
             habits=[h.model_dump() for h in habits],
@@ -198,6 +252,9 @@ def cmd_plan(args: argparse.Namespace) -> None:
             config=config.model_dump(),
             today=today,
             nudges=nudges,
+            current_time=current_time,
+            mode=mode,
+            catch_up_notes=catch_up_notes,
         )
 
     # 4. Move backlogged tasks
@@ -213,6 +270,7 @@ def cmd_plan(args: argparse.Namespace) -> None:
     _render_plan(plan, today, config.user_name)
 
     state = storage.touch_active(state)
+    state.last_plan = today
     storage.save_state(state)
 
 
@@ -1103,6 +1161,7 @@ def cmd_setup(args: argparse.Namespace) -> None:
 
     name = Prompt.ask("\nWhat should I call you?", default="friend")
     hours = Prompt.ask("Max work hours per day?", default="8")
+    day_start = Prompt.ask("What hour does your day start? (24h, used for mid-day detection)", default="10")
     currency = Prompt.ask("Currency symbol?", default="₹")
     timezone = Prompt.ask("Timezone?", default="Asia/Kolkata")
 
@@ -1115,6 +1174,7 @@ def cmd_setup(args: argparse.Namespace) -> None:
     config_data = {
         "user_name": name,
         "work_hours_cap": int(hours),
+        "day_start": int(day_start),
         "currency": currency,
         "timezone": timezone,
         "season": {
@@ -1157,6 +1217,7 @@ def main() -> None:
 
     # plan
     p_plan = sub.add_parser("plan", help="Build today's schedule")
+    p_plan.add_argument("--replan", action="store_true", help="Replan from current time")
 
     # done
     p_done = sub.add_parser("done", help="Mark a task complete")
