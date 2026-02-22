@@ -217,11 +217,13 @@ def _days_old(iso_str: str) -> int:
 
 def generate_briefing(review_data: str, cadence: Cadence) -> str:
     """Generate the opening briefing for the review session."""
+    period_map = {"weekly": "week", "monthly": "month", "quarterly": "quarter"}
+    period = period_map[cadence]
     client = _client()
     response = client.messages.create(
         model="claude-sonnet-4-6",
         max_tokens=400,
-        system=BRIEFING_SYSTEM.format(cadence=cadence),
+        system=BRIEFING_SYSTEM.format(cadence=cadence, period=period),
         messages=[{"role": "user", "content": redact(review_data)}],
     )
     return response.content[0].text.strip()
