@@ -1229,7 +1229,7 @@ def main() -> None:
         prog="viyugam",
         description="A personal Life OS — text-only, Claude-powered",
     )
-    sub = parser.add_subparsers(dest="command", required=True)
+    sub = parser.add_subparsers(dest="command", required=False)
 
     # capture
     p_capture = sub.add_parser("capture", help="Capture a thought to your inbox")
@@ -1271,13 +1271,19 @@ def main() -> None:
 
     args = parser.parse_args()
 
+    # No subcommand → open interactive REPL
+    if not args.command:
+        from viyugam.repl import run_repl
+        run_repl()
+        return
+
     # Commands that require the API key
     ai_commands = {"plan", "log", "think", "review"}
     if args.command in ai_commands:
         if not _check_api_key():
             sys.exit(1)
 
-    dispatch = {
+    _dispatch = {
         "capture": cmd_capture,
         "plan":    cmd_plan,
         "done":    cmd_done,
@@ -1288,7 +1294,7 @@ def main() -> None:
         "goals":   cmd_goals,
         "setup":   cmd_setup,
     }
-    dispatch[args.command](args)
+    _dispatch[args.command](args)
 
 
 if __name__ == "__main__":
