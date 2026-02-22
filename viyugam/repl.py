@@ -5,6 +5,7 @@ Launched when `viyugam` is called with no arguments.
 from __future__ import annotations
 import argparse
 import shlex
+import shutil
 
 from prompt_toolkit import PromptSession
 from prompt_toolkit.completion import Completer, Completion
@@ -172,13 +173,40 @@ def _dispatch(line: str) -> None:
         console.print(f"[red]Unknown command:[/red] /{cmd}   (type /help for commands)")
 
 
+# ── Visual style ─────────────────────────────────────────────────────────────
+
+_STYLE = Style.from_dict({
+    "prompt":         "#ffffff bold",
+    "border":         "#555555",
+    "bottom-toolbar": "bg:#1a1a1a #555555",
+})
+
+
+def _cols() -> int:
+    return shutil.get_terminal_size().columns
+
+
+def _bottom_toolbar() -> HTML:
+    inner = _cols() - 2
+    hints = "  /help · Tab · Ctrl-D to exit  "
+    side = (inner - len(hints)) // 2
+    return HTML(
+        f'<bottom-toolbar>╰{"─" * side}{hints}{"─" * (inner - side - len(hints))}╯</bottom-toolbar>'
+    )
+
+
+def _prompt_message() -> HTML:
+    """Top border + prompt rendered as one atomic prompt_toolkit message."""
+    inner = _cols() - 2
+    top = f'╭{"─" * inner}╮\n'
+    return HTML(f'<border>{top}│</border> <prompt>›</prompt> ')
+
+
 # ── REPL entry ────────────────────────────────────────────────────────────────
-
-_STYLE = Style.from_dict({"prompt": "#666666"})
-
 
 def run_repl() -> None:
     """Start the interactive Viyugam session."""
+    import os
     storage.ensure_dirs()
 
     # First-run: no config → run setup before entering loop
@@ -191,7 +219,6 @@ def run_repl() -> None:
         console.print()
 
     # Load API key into env once for the session
-    import os
     if not os.environ.get("ANTHROPIC_API_KEY"):
         try:
             cfg = storage.load_config()
@@ -205,17 +232,20 @@ def run_repl() -> None:
         history=FileHistory(str(history_path)),
         completer=_SlashCompleter(),
         complete_while_typing=True,
+        bottom_toolbar=_bottom_toolbar,
         style=_STYLE,
     )
 
     console.print(
-        "\n[bold]வியூகம்[/bold]  [dim]· type /help · Tab to complete · Ctrl-D to exit[/dim]\n"
+        "\n[bold]வியூகம்[/bold]  "
+        "[dim]· personal life OS[/dim]\n"
     )
 
     while True:
         try:
-            text = session.prompt(HTML("<prompt>› </prompt>"))
+            text = session.prompt(_prompt_message)
         except KeyboardInterrupt:
+            console.print()
             continue
         except EOFError:
             console.print("\n[dim]Goodbye.[/dim]\n")
@@ -230,10 +260,10 @@ def run_repl() -> None:
             console.print("\n[dim]Goodbye.[/dim]\n")
             break
 
-        # Non-slash input: treat as /capture shorthand
+        # Non-slash input: hint
         if not text.startswith("/"):
             console.print(
-                f"[dim]Tip: use /capture to add to inbox, or /help for commands.[/dim]"
+                "[dim]  Use /capture to add to inbox, or /help for all commands.[/dim]\n"
             )
             continue
 
@@ -246,3 +276,5 @@ def run_repl() -> None:
             raise
         except Exception as e:
             console.print(f"[red]Error:[/red] {e}")
+
+        console.print()  # breathing room between responses
