@@ -1,0 +1,22 @@
+@import "tailwindcss";
+@config "../tailwind.config.js";
+
+@layer base {
+  body {
+    @apply bg-background text-slate-900 font-sans antialiased;
+  }
+}
+
+/* Custom Scrollbar for horizontal flow */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  @apply bg-transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  @apply bg-slate-200 rounded-full hover:bg-slate-300 transition-colors;
+}
