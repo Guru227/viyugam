@@ -1,24 +1,17 @@
-# Python / Backend
+# Python
 __pycache__/
 *.py[cod]
-*$py.class
-.venv/
-.env
-backend/.env
+*.egg-info/
 dist/
 build/
-*.egg-info/
+.venv/
 
-# Node / Web
-node_modules/
-.next/
-web/.env.local
-web/.env
+# uv
+.python-version
 
-# IDEs
-.vscode/
-.idea/
-*.swp
+# Secrets / local config
+.env
+*.env
 
 # OS
 .DS_Store
