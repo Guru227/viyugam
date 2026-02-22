@@ -1148,49 +1148,69 @@ def cmd_goals(args: argparse.Namespace) -> None:
 # ── setup ──────────────────────────────────────────────────────────────────────
 
 def cmd_setup(args: argparse.Namespace) -> None:
-    """First-run setup: create config.yaml with user preferences."""
-    from viyugam.models import ViyugamConfig, SeasonConfig, Dimension
+    """Setup: create or update config.yaml. Existing values are preserved as defaults."""
     import yaml
 
-    console.print(Panel(
-        "[bold]Welcome to Viyugam.[/bold]\n\n"
-        "A personal Life OS. Let's get you set up.",
-        border_style="cyan",
-        padding=(1, 2),
-    ))
+    storage.ensure_dirs()
 
-    name = Prompt.ask("\nWhat should I call you?", default="friend")
-    hours = Prompt.ask("Max work hours per day?", default="8")
-    day_start = Prompt.ask("What hour does your day start? (24h, used for mid-day detection)", default="10")
-    currency = Prompt.ask("Currency symbol?", default="₹")
-    timezone = Prompt.ask("Timezone?", default="Asia/Kolkata")
+    # Load existing config so we never wipe settings the user already has
+    existing = storage.load_config()
+    is_update = storage.CONFIG_FILE.exists()
+
+    if is_update:
+        console.print(Panel(
+            "[bold]Update Viyugam config.[/bold]\n\n"
+            "Existing values shown as defaults — press Enter to keep them.",
+            border_style="cyan",
+            padding=(1, 2),
+        ))
+    else:
+        console.print(Panel(
+            "[bold]Welcome to Viyugam.[/bold]\n\n"
+            "A personal Life OS. Let's get you set up.",
+            border_style="cyan",
+            padding=(1, 2),
+        ))
+
+    name      = Prompt.ask("\nWhat should I call you?", default=existing.user_name)
+    hours     = Prompt.ask("Max work hours per day?", default=str(existing.work_hours_cap))
+    day_start = Prompt.ask("Day start hour (24h, for mid-day detection)", default=str(existing.day_start))
+    currency  = Prompt.ask("Currency symbol?", default=existing.currency)
+    timezone  = Prompt.ask("Timezone?", default=existing.timezone)
 
     console.print("\n[bold]Current season[/bold] — what are you focused on this quarter?")
     console.print("[dim]Dimensions: health, wealth, career, relationships, joy, learning[/dim]")
-    season_name = Prompt.ask("Season name", default="Q1 2026")
-    season_focus = Prompt.ask("Primary focus", default="career")
-    season_secondary = Prompt.ask("Secondary focus (optional)", default="")
+    default_season_name = existing.season.name if existing.season else "Q1 2026"
+    default_season_focus = existing.season.focus.value if existing.season else "career"
+    default_season_secondary = existing.season.secondary.value if (existing.season and existing.season.secondary) else ""
+    season_name      = Prompt.ask("Season name", default=default_season_name)
+    season_focus     = Prompt.ask("Primary focus", default=default_season_focus)
+    season_secondary = Prompt.ask("Secondary focus (optional)", default=default_season_secondary)
 
+    # Build config — preserve api_key if it was already set
     config_data = {
-        "user_name": name,
+        "user_name":      name,
         "work_hours_cap": int(hours),
-        "day_start": int(day_start),
-        "currency": currency,
-        "timezone": timezone,
+        "day_start":      int(day_start),
+        "currency":       currency,
+        "timezone":       timezone,
         "season": {
-            "name": season_name,
+            "name":  season_name,
             "focus": season_focus,
-        }
+        },
     }
     if season_secondary:
         config_data["season"]["secondary"] = season_secondary
+    if existing.api_key:
+        config_data["api_key"] = existing.api_key  # always preserve
 
-    storage.ensure_dirs()
     with open(storage.CONFIG_FILE, "w") as f:
         yaml.dump(config_data, f, default_flow_style=False, allow_unicode=True)
 
-    console.print(f"\n[green]All set.[/green] Config saved to [dim]{storage.CONFIG_FILE}[/dim]")
-    console.print("\nTry [bold]viyugam capture \"your first thought\"[/bold] to get started.\n")
+    verb = "Updated" if is_update else "Saved"
+    console.print(f"\n[green]{verb}.[/green] Config at [dim]{storage.CONFIG_FILE}[/dim]")
+    if not is_update:
+        console.print("\nTry [bold]viyugam capture \"your first thought\"[/bold] to get started.\n")
 
 
 # ── CLI wiring ─────────────────────────────────────────────────────────────────
