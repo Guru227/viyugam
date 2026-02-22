@@ -12,12 +12,62 @@ from prompt_toolkit.completion import Completer, Completion
 from prompt_toolkit.formatted_text import HTML
 from prompt_toolkit.history import FileHistory
 from prompt_toolkit.styles import Style
+from rich.align import Align
 from rich.console import Console
 from rich.table import Table
+from rich.text import Text
 
 import viyugam.storage as storage
 
 console = Console()
+
+
+# ── Greeting ──────────────────────────────────────────────────────────────────
+
+# Each line is a (text, style) tuple — style applied to the whole line.
+# Rich markup used inline for multi-colour lines.
+_ART = [
+    ("", ""),
+    ("██╗   ██╗██╗██╗   ██╗██╗   ██╗ ██████╗  █████╗ ███╗   ███╗", "bold cyan"),
+    ("██║   ██║██║╚██╗ ██╔╝╚██╗ ██╔╝██╔════╝ ██╔══██╗████╗ ████║", "bold cyan"),
+    ("██║   ██║██║ ╚████╔╝  ╚████╔╝ ██║  ███╗███████║██╔████╔██║", "bold cyan"),
+    ("╚██╗ ██╔╝██║  ╚██╔╝    ╚██╔╝  ██║   ██║██╔══██║██║╚██╔╝██║", "bold cyan"),
+    (" ╚████╔╝ ██║   ██║      ██║    ╚██████╔╝██║  ██║██║ ╚═╝ ██║", "bold cyan"),
+    ("  ╚═══╝  ╚═╝   ╚═╝      ╚═╝     ╚═════╝ ╚═╝  ╚═╝╚═╝     ╚═╝", "bold cyan"),
+    ("", ""),
+    # ── elephant ──────────────────────────────────────────────────────────────
+    #   ears            head                    ears
+    ("▄▄░░░▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄░░░▄▄", "blue"),
+    ("████░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░████", "blue"),
+    ("████░░  ██████████████████████████  ░░████", "blue"),
+    ("████░░  ██  ██              ██  ██  ░░████", "blue"),
+    ("████░░  ██  ██   [red]▄[/red][bold red]●[/bold red][red]▄[/red]   ██  ██  ░░████", "blue"),
+    ("████░░  ██  ██████████████████  ██  ░░████", "blue"),
+    ("████░░  ████████████████████████████░░████", "blue"),
+    ("▀▀░░░▀▀████░░░░░░░░░░░░░░░░░░░░████▀▀░░░▀▀", "blue"),
+    ("        ████  ████        ████  ████", "cyan"),
+    ("        ████  ██████████████  ████", "cyan"),
+    ("          ████                ████", "cyan"),
+    ("           ▀██▄  ██████  ▄██▀", "cyan"),
+    ("", ""),
+    ("  வியூகம்  ·  personal life OS", "dim"),
+    ("", ""),
+]
+
+
+def _show_greeting() -> None:
+    for text, style in _ART:
+        if not text:
+            console.print()
+            continue
+        # Lines with inline Rich markup (contain [) — print as markup, centred
+        if "[" in text:
+            # Wrap in the base style colour first, then let inline markup override
+            console.print(Align.center(text), style=style or None)
+        else:
+            t = Text(text, style=style or "default")
+            console.print(Align.center(t))
+
 
 # ── Commands ──────────────────────────────────────────────────────────────────
 
@@ -236,10 +286,7 @@ def run_repl() -> None:
         style=_STYLE,
     )
 
-    console.print(
-        "\n[bold]வியூகம்[/bold]  "
-        "[dim]· personal life OS[/dim]\n"
-    )
+    _show_greeting()
 
     while True:
         try:
