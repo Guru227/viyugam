@@ -136,6 +136,7 @@ def cmd_capture(args: argparse.Namespace) -> None:
 
     item = storage.append_inbox(text)
     console.print(f"[green]Captured.[/green] [dim](id: {item.id})[/dim]")
+    console.print("[dim]Tip: Just dump thoughts freely — Claude breaks them into tasks during /plan.[/dim]")
 
     inbox_count = len(storage.get_inbox(unprocessed_only=True))
     if inbox_count >= 5:
@@ -267,7 +268,14 @@ def cmd_plan(args: argparse.Namespace) -> None:
         storage.save_tasks(tasks_to_update)
 
     # 5. Render schedule
-    _render_plan(plan, today, config.user_name)
+    all_tasks_for_backlog = storage.get_tasks()
+    backlog_tasks = [
+        t for t in all_tasks_for_backlog
+        if t.status.value != "done"
+        and (not t.scheduled_date or t.scheduled_date != today)
+        and not t.is_habit
+    ]
+    _render_plan(plan, today, config.user_name, backlog_tasks=backlog_tasks)
 
     state = storage.touch_active(state)
     state.last_plan = today
@@ -292,14 +300,9 @@ def _process_inbox_items(inbox_items, config) -> None:
         return
 
     processed_ids = []
-    human_territory_items = []
+    inbox_rows: list[tuple[str, str, str, str]] = []  # badge, title, dimension, time
 
     for result in results:
-        if result.get("human_territory") or result.get("type") == "human_territory":
-            human_territory_items.append(result)
-            processed_ids.append(_find_inbox_id(inbox_items, result.get("original", "")))
-            continue
-
         if result.get("type") == "task":
             task = Task(
                 title=result.get("title", result.get("original", "Untitled")),
@@ -311,7 +314,8 @@ def _process_inbox_items(inbox_items, config) -> None:
                 scheduled_date=date.today().isoformat(),
             )
             storage.save_task(task)
-            console.print(f"  [green]+[/green] Task: [bold]{task.title}[/bold]")
+            dim_str = task.dimension.value if task.dimension else "—"
+            inbox_rows.append(("Task", task.title, dim_str, f"{task.estimated_minutes}m"))
 
         elif result.get("type") == "project":
             project = Project(
@@ -319,45 +323,26 @@ def _process_inbox_items(inbox_items, config) -> None:
                 description=result.get("notes"),
             )
             storage.save_project(project)
-            console.print(f"  [blue]+[/blue] Project: [bold]{project.title}[/bold]")
+            inbox_rows.append(("Project", project.title, "—", "—"))
 
         elif result.get("type") == "note":
-            console.print(f"  [dim]  Note kept: {result.get('title', result.get('original', ''))}[/dim]")
+            title = result.get("title", result.get("original", ""))
+            inbox_rows.append(("Note", title, "—", "—"))
 
         processed_ids.append(_find_inbox_id(inbox_items, result.get("original", "")))
 
-    # Handle human territory items
-    if human_territory_items:
-        console.print()
-        for item in human_territory_items:
-            console.print(Panel(
-                f"[bold]\"{item.get('original', '')}\"[/bold]\n\n"
-                "I could turn this into a task — but this might be one of those things "
-                "that's better lived than tracked.\n\n"
-                "The effort of remembering, or getting it delightfully wrong, "
-                "is part of what makes it meaningful.\n\n"
-                "[dim]Want to let this one stay human?[/dim]",
-                border_style="yellow",
-                padding=(1, 2),
-            ))
-            choice = Prompt.ask(
-                "What would you like to do?",
-                choices=["keep human", "add as task", "discard"],
-                default="keep human",
-            )
-            if choice == "add as task":
-                task = Task(
-                    title=item.get("title", item.get("original", "Untitled")),
-                    dimension=item.get("dimension"),
-                    energy_cost=item.get("energy_cost", 3),
-                    estimated_minutes=item.get("estimated_minutes", 30),
-                )
-                storage.save_task(task)
-                console.print(f"  [green]+[/green] Added: [bold]{task.title}[/bold]")
-            else:
-                console.print("  [dim]Kept human. Good call.[/dim]")
-
     storage.mark_inbox_processed([pid for pid in processed_ids if pid])
+
+    if inbox_rows:
+        tbl = Table(box=box.SIMPLE, show_header=True, header_style="bold dim", padding=(0, 1))
+        tbl.add_column("Type", style="dim", width=9)
+        tbl.add_column("Title", min_width=28)
+        tbl.add_column("Dimension", style="dim", width=14)
+        tbl.add_column("Time", justify="right", style="dim", width=6)
+        for badge, title, dim, time in inbox_rows:
+            badge_style = {"Task": "green", "Project": "blue", "Note": "dim"}.get(badge, "dim")
+            tbl.add_row(f"[{badge_style}]{badge}[/{badge_style}]", title, dim, time)
+        console.print(Panel(tbl, title="[bold]Inbox processed[/bold]", border_style="dim", padding=(0, 1)))
     console.print()
 
 
@@ -370,7 +355,9 @@ def _find_inbox_id(inbox_items, original_text: str) -> str | None:
     return None
 
 
-def _render_plan(plan: dict, today: str, user_name: str) -> None:
+def _render_plan(plan: dict, today: str, user_name: str, backlog_tasks=None) -> None:
+    from rich.columns import Columns
+
     schedule = plan.get("schedule", [])
     nudges = plan.get("nudges", [])
     moved = plan.get("moved_to_backlog", [])
@@ -389,14 +376,14 @@ def _render_plan(plan: dict, today: str, user_name: str) -> None:
     if energy_read:
         console.print(f"\n[dim]{energy_read}[/dim]\n")
 
-    # Schedule table
+    # Build today's schedule table
     if schedule:
-        table = Table(box=box.SIMPLE, show_header=True, header_style="bold dim")
-        table.add_column("Time", style="cyan", width=7)
-        table.add_column("", width=2)
-        table.add_column("Task", min_width=30)
-        table.add_column("Duration", justify="right", style="dim", width=9)
-        table.add_column("Energy", justify="center", width=8)
+        sched_table = Table(box=box.SIMPLE, show_header=True, header_style="bold dim")
+        sched_table.add_column("Time", style="cyan", width=7)
+        sched_table.add_column("", width=2)
+        sched_table.add_column("Task", min_width=26)
+        sched_table.add_column("Dur", justify="right", style="dim", width=5)
+        sched_table.add_column("E", justify="center", width=5)
 
         for item in schedule:
             time_str = item.get("time", "")
@@ -406,27 +393,64 @@ def _render_plan(plan: dict, today: str, user_name: str) -> None:
             item_type = item.get("type", "task")
 
             if item_type == "break":
-                table.add_row(
+                sched_table.add_row(
                     time_str, "·",
                     Text("Break", style="dim italic"),
                     f"{duration}m", ""
                 )
             elif item_type == "habit":
-                table.add_row(
+                sched_table.add_row(
                     time_str, "◎",
                     Text(title, style="green"),
                     f"{duration}m",
                     _energy_bar(energy) if energy else "",
                 )
             else:
-                table.add_row(
+                sched_table.add_row(
                     time_str, "▸",
                     title,
                     f"{duration}m",
                     _energy_bar(energy) if energy else "",
                 )
 
-        console.print(table)
+        today_panel = Panel(sched_table, title="[bold]Today[/bold]", border_style="cyan", padding=(0, 1))
+    else:
+        today_panel = Panel("[dim]Nothing scheduled.[/dim]", title="[bold]Today[/bold]", border_style="cyan", padding=(0, 1))
+
+    # Build backlog panel
+    if backlog_tasks:
+        # Group by dimension
+        by_dim: dict[str, list] = {}
+        for t in backlog_tasks[:20]:
+            key = t.dimension.value if t.dimension else "other"
+            by_dim.setdefault(key, []).append(t)
+
+        bl_table = Table(box=None, show_header=False, padding=(0, 1))
+        bl_table.add_column(style="dim", width=8, no_wrap=True)
+        bl_table.add_column(min_width=20)
+        bl_table.add_column(style="dim")
+
+        for dim, tasks in sorted(by_dim.items()):
+            bl_table.add_row(f"[dim]{dim}[/dim]", "", "")
+            for t in tasks:
+                bl_table.add_row(
+                    f"  [dim]{t.id}[/dim]",
+                    t.title,
+                    f"{t.estimated_minutes}m",
+                )
+
+        backlog_count = len(backlog_tasks)
+        overflow_note = f"\n[dim]  … and {backlog_count - 20} more[/dim]" if backlog_count > 20 else ""
+        backlog_panel = Panel(
+            bl_table,
+            title=f"[bold]Everything else[/bold] [dim]({backlog_count})[/dim]",
+            border_style="dim",
+            padding=(0, 1),
+        )
+    else:
+        backlog_panel = Panel("[dim]Backlog empty.[/dim]", title="[bold]Everything else[/bold]", border_style="dim", padding=(0, 1))
+
+    console.print(Columns([today_panel, backlog_panel], equal=True, expand=True))
 
     # Moved to backlog
     if moved:
@@ -1105,6 +1129,8 @@ def cmd_goals(args: argparse.Namespace) -> None:
     config = storage.load_config()
 
     if getattr(args, "add", False):
+        from viyugam.agents.boardroom import run_debate
+
         # Add a new goal
         title = " ".join(args.title) if args.title else Prompt.ask("Goal title")
         console.print("[dim]Dimensions: health, wealth, career, relationships, joy, learning[/dim]")
@@ -1114,9 +1140,86 @@ def cmd_goals(args: argparse.Namespace) -> None:
         except ValueError:
             console.print(f"[red]Unknown dimension '{dim_str}'. Choose from: health, wealth, career, relationships, joy, learning[/red]")
             return
-        goal = Goal(title=title, dimension=dimension)
-        storage.save_goal(goal)
-        console.print(f"[green]Goal added:[/green] {goal.title} [dim]({goal.dimension.value}) id: {goal.id}[/dim]")
+
+        # Gather context for boardroom debate
+        season = config.season.model_dump() if config.season else None
+        dimension_scores = storage.get_avg_dimension_scores(days=14)
+        projects = storage.get_projects(status="active")
+        existing_goals = storage.get_goals()
+        actual_season = storage.calculate_actual_season()
+
+        console.print()
+        console.print(Panel(
+            f"[bold]\"{title}\"[/bold]\n[dim]Dimension: {dim_str}[/dim]",
+            title="[bold cyan]The Boardroom · Goal Review[/bold cyan]",
+            border_style="cyan",
+            padding=(1, 2),
+        ))
+
+        with console.status("[dim]The board is deliberating...[/dim]"):
+            try:
+                result = run_debate(
+                    proposal=f"Add long-term goal: {title} ({dim_str})",
+                    season=season,
+                    dimension_scores=dimension_scores,
+                    active_projects=[p.model_dump() for p in projects],
+                    goals=[g.model_dump() for g in existing_goals],
+                    actual_season=actual_season,
+                )
+            except Exception as e:
+                console.print(f"[red]Boardroom error:[/red] {e}")
+                return
+
+        # Render transcript
+        console.print()
+        voice_colors = {"Vision": "blue", "Resource": "yellow", "Risk": "red"}
+        vote_symbols = {"yes": "[green]YES[/green]", "no": "[red]NO[/red]", "conditional": "[yellow]CONDITIONAL[/yellow]"}
+
+        for entry in result.get("transcript", []):
+            voice = entry.get("voice", "")
+            text = entry.get("text", "")
+            vote = entry.get("vote", "").lower()
+            color = voice_colors.get(voice, "white")
+            vote_display = vote_symbols.get(vote, vote.upper())
+            console.print(Panel(
+                f"{text}\n\n[dim]Vote: {vote_display}[/dim]",
+                title=f"[bold {color}]{voice}[/bold {color}]",
+                border_style=color,
+                padding=(0, 2),
+            ))
+
+        consensus = result.get("consensus", "")
+        summary = result.get("summary", "")
+        condition = result.get("condition")
+
+        consensus_color = {"approved": "green", "rejected": "red", "conditional": "yellow"}.get(consensus, "white")
+        console.print()
+        console.print(Panel(
+            f"[bold {consensus_color}]{consensus.upper()}[/bold {consensus_color}]\n\n{summary}"
+            + (f"\n\n[dim]Condition: {condition}[/dim]" if condition else ""),
+            title="[bold]Consensus[/bold]",
+            border_style="dim",
+            padding=(1, 2),
+        ))
+        console.print()
+
+        # Outcome handling
+        should_save = False
+        if consensus == "approved":
+            should_save = True
+        elif consensus == "conditional":
+            if condition:
+                console.print(f"[yellow]Condition:[/yellow] {condition}")
+            should_save = Confirm.ask("Save goal anyway?", default=True)
+        else:  # rejected
+            should_save = Confirm.ask("Add goal anyway?", default=False)
+
+        if should_save:
+            goal = Goal(title=title, dimension=dimension)
+            storage.save_goal(goal)
+            console.print(f"[green]Goal added:[/green] {goal.title} [dim]({goal.dimension.value}) id: {goal.id}[/dim]")
+        else:
+            console.print("[dim]Goal not saved.[/dim]")
         return
 
     # List goals
@@ -1143,6 +1246,56 @@ def cmd_goals(args: argparse.Namespace) -> None:
             console.print(f"  [dim]{g.id}[/dim]  {g.title}{active_marker}")
 
     console.print()
+
+
+# ── research ───────────────────────────────────────────────────────────────────
+
+def cmd_research(args: argparse.Namespace) -> None:
+    from viyugam.agents.researcher import run_research
+    from rich.markdown import Markdown
+
+    state = startup_check()
+    topic = " ".join(args.topic)
+    if not topic.strip():
+        console.print("[red]Usage: viyugam research <topic>[/red]")
+        return
+
+    console.print()
+    console.print(Panel(
+        f"[bold]\"{topic}\"[/bold]",
+        title="[bold cyan]Research[/bold cyan]",
+        border_style="cyan",
+        padding=(0, 2),
+    ))
+
+    status_text = ["Researching..."]
+
+    def on_status(msg: str) -> None:
+        status_text[0] = msg
+
+    with console.status(f"[dim]{status_text[0]}[/dim]") as s:
+        def update_status(msg: str) -> None:
+            status_text[0] = msg
+            s.update(f"[dim]{msg}[/dim]")
+
+        try:
+            content = run_research(topic, on_status=update_status)
+        except Exception as e:
+            console.print(f"[red]Research error:[/red] {e}")
+            return
+
+    if not content:
+        console.print("[yellow]No results returned.[/yellow]")
+        return
+
+    console.print()
+    console.print(Markdown(content))
+
+    path = storage.save_research(topic, content)
+    console.print(f"\n[green]Saved.[/green] [dim]{path}[/dim]\n")
+
+    state = storage.touch_active(state)
+    storage.save_state(state)
 
 
 # ── setup ──────────────────────────────────────────────────────────────────────
@@ -1266,6 +1419,10 @@ def main() -> None:
     p_goals.add_argument("title", nargs="*", help="Goal title (when using --add)")
     p_goals.add_argument("--dimension", "-d", help="Dimension for the goal")
 
+    # research
+    p_research = sub.add_parser("research", help="Research a topic using web search")
+    p_research.add_argument("topic", nargs="+", help="The topic to research")
+
     # setup
     p_setup = sub.add_parser("setup", help="First-run configuration")
 
@@ -1278,21 +1435,22 @@ def main() -> None:
         return
 
     # Commands that require the API key
-    ai_commands = {"plan", "log", "think", "review"}
+    ai_commands = {"plan", "log", "think", "review", "research"}
     if args.command in ai_commands:
         if not _check_api_key():
             sys.exit(1)
 
     _dispatch = {
-        "capture": cmd_capture,
-        "plan":    cmd_plan,
-        "done":    cmd_done,
-        "status":  cmd_status,
-        "log":     cmd_log,
-        "think":   cmd_think,
-        "review":  cmd_review,
-        "goals":   cmd_goals,
-        "setup":   cmd_setup,
+        "capture":  cmd_capture,
+        "plan":     cmd_plan,
+        "done":     cmd_done,
+        "status":   cmd_status,
+        "log":      cmd_log,
+        "think":    cmd_think,
+        "review":   cmd_review,
+        "goals":    cmd_goals,
+        "research": cmd_research,
+        "setup":    cmd_setup,
     }
     _dispatch[args.command](args)
 

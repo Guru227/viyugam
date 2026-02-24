@@ -24,6 +24,7 @@ from viyugam.models import (
 HOME      = Path.home() / ".viyugam"
 DATA      = HOME / "data"
 JOURNALS  = HOME / "journals"
+RESEARCH  = HOME / "research"
 CONFIG_FILE = HOME / "config.yaml"
 
 
@@ -32,6 +33,7 @@ def ensure_dirs() -> None:
     HOME.mkdir(exist_ok=True)
     DATA.mkdir(exist_ok=True)
     JOURNALS.mkdir(exist_ok=True)
+    RESEARCH.mkdir(exist_ok=True)
     for name in ("tasks", "projects", "goals", "inbox", "someday", "state"):
         path = DATA / f"{name}.json"
         if not path.exists():
@@ -388,6 +390,19 @@ def get_avg_dimension_scores(days: int = 14) -> list[dict]:
         avg = round(sum(scores) / len(scores), 1)
         result.append({"dimension": dim, "score": avg, "note": None})
     return result
+
+
+# ── Nudge detection ────────────────────────────────────────────────────────────
+
+# ── Research ───────────────────────────────────────────────────────────────────
+
+def save_research(topic: str, content: str) -> Path:
+    """Save a research report to ~/.viyugam/research/{slug}-{date}.md."""
+    slug = re.sub(r"[^a-z0-9]+", "-", topic.lower()).strip("-")[:60]
+    today = date.today().isoformat()
+    path = RESEARCH / f"{slug}-{today}.md"
+    path.write_text(content, encoding="utf-8")
+    return path
 
 
 # ── Nudge detection ────────────────────────────────────────────────────────────

@@ -12,10 +12,8 @@ from prompt_toolkit.completion import Completer, Completion
 from prompt_toolkit.formatted_text import HTML
 from prompt_toolkit.history import FileHistory
 from prompt_toolkit.styles import Style
-from rich.align import Align
 from rich.console import Console
 from rich.table import Table
-from rich.text import Text
 
 import viyugam.storage as storage
 
@@ -24,49 +22,23 @@ console = Console()
 
 # ── Greeting ──────────────────────────────────────────────────────────────────
 
-# Each line is a (text, style) tuple — style applied to the whole line.
-# Rich markup used inline for multi-colour lines.
-_ART = [
-    ("", ""),
-    ("██╗   ██╗██╗██╗   ██╗██╗   ██╗ ██████╗  █████╗ ███╗   ███╗", "bold cyan"),
-    ("██║   ██║██║╚██╗ ██╔╝╚██╗ ██╔╝██╔════╝ ██╔══██╗████╗ ████║", "bold cyan"),
-    ("██║   ██║██║ ╚████╔╝  ╚████╔╝ ██║  ███╗███████║██╔████╔██║", "bold cyan"),
-    ("╚██╗ ██╔╝██║  ╚██╔╝    ╚██╔╝  ██║   ██║██╔══██║██║╚██╔╝██║", "bold cyan"),
-    (" ╚████╔╝ ██║   ██║      ██║    ╚██████╔╝██║  ██║██║ ╚═╝ ██║", "bold cyan"),
-    ("  ╚═══╝  ╚═╝   ╚═╝      ╚═╝     ╚═════╝ ╚═╝  ╚═╝╚═╝     ╚═╝", "bold cyan"),
-    ("", ""),
-    # ── elephant ──────────────────────────────────────────────────────────────
-    #   ears            head                    ears
-    ("▄▄░░░▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄░░░▄▄", "blue"),
-    ("████░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░████", "blue"),
-    ("████░░  ██████████████████████████  ░░████", "blue"),
-    ("████░░  ██  ██              ██  ██  ░░████", "blue"),
-    ("████░░  ██  ██   [red]▄[/red][bold red]●[/bold red][red]▄[/red]   ██  ██  ░░████", "blue"),
-    ("████░░  ██  ██████████████████  ██  ░░████", "blue"),
-    ("████░░  ████████████████████████████░░████", "blue"),
-    ("▀▀░░░▀▀████░░░░░░░░░░░░░░░░░░░░████▀▀░░░▀▀", "blue"),
-    ("        ████  ████        ████  ████", "cyan"),
-    ("        ████  ██████████████  ████", "cyan"),
-    ("          ████                ████", "cyan"),
-    ("           ▀██▄  ██████  ▄██▀", "cyan"),
-    ("", ""),
-    ("  வியூகம்  ·  personal life OS", "dim"),
-    ("", ""),
+_ART_LINES = [
+    "",
+    "[bold cyan]██╗   ██╗██╗██╗   ██╗██╗   ██╗ ██████╗  █████╗ ███╗   ███╗[/bold cyan]",
+    "[bold cyan]██║   ██║██║╚██╗ ██╔╝╚██╗ ██╔╝██╔════╝ ██╔══██╗████╗ ████║[/bold cyan]",
+    "[bold cyan]██║   ██║██║ ╚████╔╝  ╚████╔╝ ██║  ███╗███████║██╔████╔██║[/bold cyan]",
+    "[bold cyan]╚██╗ ██╔╝██║  ╚██╔╝    ╚██╔╝  ██║   ██║██╔══██║██║╚██╔╝██║[/bold cyan]",
+    "[bold cyan] ╚████╔╝ ██║   ██║      ██║    ╚██████╔╝██║  ██║██║ ╚═╝ ██║[/bold cyan]",
+    "[bold cyan]  ╚═══╝  ╚═╝   ╚═╝      ╚═╝     ╚═════╝ ╚═╝  ╚═╝╚═╝     ╚═╝[/bold cyan]",
+    "",
+    "[dim]            வியூகம்  ·  personal life OS[/dim]",
+    "",
 ]
 
 
 def _show_greeting() -> None:
-    for text, style in _ART:
-        if not text:
-            console.print()
-            continue
-        # Lines with inline Rich markup (contain [) — print as markup, centred
-        if "[" in text:
-            # Wrap in the base style colour first, then let inline markup override
-            console.print(Align.center(text), style=style or None)
-        else:
-            t = Text(text, style=style or "default")
-            console.print(Align.center(t))
+    for line in _ART_LINES:
+        console.print(line, justify="center")
 
 
 # ── Commands ──────────────────────────────────────────────────────────────────
@@ -74,26 +46,30 @@ def _show_greeting() -> None:
 COMMANDS: dict[str, str] = {
     "plan":    "Build today's schedule",
     "capture": "Add a thought to inbox          /capture <text>",
+    "c":       "Quick capture                  /c <text>",
     "done":    "Mark a task complete            /done <id>",
     "log":     "Evening journal session",
     "think":   "Boardroom debate                /think <proposal>  (no args = someday list)",
-    "review":  "Weekly / monthly / quarterly review",
-    "goals":   "View and manage goals",
-    "status":  "Quick overview of today",
-    "setup":   "Update configuration",
-    "help":    "Show this help",
-    "exit":    "Exit Viyugam",
+    "review":   "Weekly / monthly / quarterly review",
+    "goals":    "View and manage goals",
+    "research": "Research a topic using web search   /research <topic>",
+    "status":   "Quick overview of today",
+    "setup":    "Update configuration",
+    "help":     "Show this help",
+    "exit":     "Exit Viyugam",
 }
 
 # All completions including flags — shown when user types /
 _COMPLETIONS = [
     "/plan", "/plan --replan",
     "/capture ",
+    "/c ",
     "/done ",
     "/log", "/log --force",
     "/think", "/think ",
     "/review", "/review --weekly", "/review --monthly", "/review --quarterly",
     "/goals", "/goals --add ",
+    "/research ",
     "/status",
     "/setup",
     "/help",
@@ -130,6 +106,66 @@ def _show_help() -> None:
     console.print()
 
 
+# ── Task picker ───────────────────────────────────────────────────────────────
+
+def _pick_task():
+    """Interactive numbered task picker. Returns a Task or None."""
+    from prompt_toolkit.shortcuts import prompt as pt_prompt
+    from viyugam.models import TaskStatus
+
+    all_tasks = storage.get_tasks(include_habits=False)
+    active = [
+        t for t in all_tasks
+        if t.status in (TaskStatus.TODO, TaskStatus.BACKLOG, TaskStatus.IN_PROGRESS)
+    ]
+
+    if not active:
+        console.print("[dim]No active tasks found.[/dim]")
+        return None
+
+    def _render(tasks) -> None:
+        tbl = Table(box=None, show_header=True, header_style="bold dim", padding=(0, 1))
+        tbl.add_column("#", style="dim", width=4)
+        tbl.add_column("Title", min_width=30)
+        tbl.add_column("Info", style="dim")
+        for i, t in enumerate(tasks, 1):
+            info_parts = []
+            if t.dimension:
+                info_parts.append(t.dimension.value)
+            info_parts.append(f"{t.estimated_minutes}m")
+            tbl.add_row(str(i), t.title, " · ".join(info_parts))
+        console.print(tbl)
+
+    current = list(active)
+    _render(current)
+
+    while True:
+        try:
+            raw = pt_prompt("Pick number or filter text (Enter to cancel): ").strip()
+        except (KeyboardInterrupt, EOFError):
+            return None
+
+        if not raw:
+            return None
+
+        if raw.isdigit():
+            idx = int(raw) - 1
+            if 0 <= idx < len(current):
+                return current[idx]
+            console.print(f"[red]Out of range.[/red] Pick 1–{len(current)}.")
+        else:
+            # Filter by title/id
+            filtered = [
+                t for t in active
+                if raw.lower() in t.title.lower() or raw.lower() in t.id.lower()
+            ]
+            if not filtered:
+                console.print("[yellow]No match.[/yellow] Try again or Enter to cancel.")
+            else:
+                current = filtered
+                _render(current)
+
+
 # ── Dispatcher ────────────────────────────────────────────────────────────────
 
 def _dispatch(line: str) -> None:
@@ -137,7 +173,7 @@ def _dispatch(line: str) -> None:
     from viyugam.main import (
         cmd_capture, cmd_plan, cmd_done, cmd_log,
         cmd_think, cmd_review, cmd_goals, cmd_status, cmd_setup,
-        _check_api_key,
+        cmd_research, _check_api_key,
     )
 
     # Strip leading slash
@@ -157,7 +193,7 @@ def _dispatch(line: str) -> None:
     rest = parts[1:]
     flags = set(rest)
 
-    AI_COMMANDS = {"plan", "log", "think", "review"}
+    AI_COMMANDS = {"plan", "log", "think", "review", "research"}
 
     if cmd in AI_COMMANDS and not _check_api_key():
         return
@@ -165,7 +201,7 @@ def _dispatch(line: str) -> None:
     if cmd == "plan":
         cmd_plan(argparse.Namespace(replan="--replan" in flags))
 
-    elif cmd == "capture":
+    elif cmd in ("capture", "c"):
         if not rest:
             console.print("[yellow]Usage:[/yellow] /capture <text>")
             return
@@ -181,6 +217,13 @@ def _dispatch(line: str) -> None:
         cmd_log(argparse.Namespace(force="--force" in flags))
 
     elif cmd == "think":
+        if not rest:
+            task = _pick_task()
+            if task is not None:
+                context = task.notes or (task.dimension.value if task.dimension else "")
+                proposal = f'"{task.title}"\n\nContext: {context}'
+                cmd_think(argparse.Namespace(proposal=[proposal]))
+                return
         cmd_think(argparse.Namespace(proposal=rest))
 
     elif cmd == "review":
@@ -206,6 +249,16 @@ def _dispatch(line: str) -> None:
                 title_parts.append(rest[i])
                 i += 1
         cmd_goals(argparse.Namespace(add=add, title=title_parts, dimension=dimension))
+
+    elif cmd == "research":
+        if not rest:
+            task = _pick_task()
+            if task is None:
+                return
+            topic = f"{task.title} {task.notes or ''}".strip()
+            cmd_research(argparse.Namespace(topic=[topic]))
+            return
+        cmd_research(argparse.Namespace(topic=rest))
 
     elif cmd == "status":
         cmd_status(argparse.Namespace())

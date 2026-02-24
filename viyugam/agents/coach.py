@@ -2,7 +2,6 @@
 agents/coach.py — The Coach.
 Runs the conversational journaling session.
 Dual voice: Observer + Encourager.
-Human Living Guardian always active.
 """
 from __future__ import annotations
 import json
@@ -36,13 +35,6 @@ Your core rules:
 4. Bias toward action and forward momentum, not endless reflection.
 5. Keep responses concise — this is a conversation, not an essay.
 6. Ask one follow-up question at a time. Never pepper the user with multiple questions.
-
-THE HUMAN LIVING GUARDIAN (critical rule):
-If the user mentions something that involves the texture of human connection — what a friend likes, a gift idea for someone, a memory with a loved one, an experience they want to have WITH someone, anything where the effort and the doing IS the value — pause and reflect gently:
-
-Say something like: "That's the kind of thing that might be better lived than logged. The effort of remembering, or getting it wrong and laughing about it, is part of what makes it meaningful. Worth keeping human?"
-
-This is not a block. It's a moment of reflection. Then move on.
 
 WRAPPING UP:
 When the conversation has covered enough ground (usually 4-8 exchanges), naturally bring it to a close. End your final message with exactly this marker on its own line:

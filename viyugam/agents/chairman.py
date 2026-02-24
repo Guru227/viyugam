@@ -32,16 +32,12 @@ Rules:
 - Be practical and grounded. Don't over-engineer classifications.
 - Energy cost is cognitive load 1-10 (1 = mindless, 10 = deep focus required).
 - Dimensions: health, wealth, career, relationships, joy, learning.
-- If something sounds like it involves a person the user loves (gift ideas, personal details
-  about friends/family, emotional memories), flag it as human_territory: true.
-  These deserve a gentle check before being turned into tasks.
 
 Return ONLY a JSON array, no other text:
 [
   {
     "original": "...",
-    "type": "task" | "project" | "note" | "human_territory",
-    "human_territory": false,
+    "type": "task" | "project" | "note",
     "title": "...",
     "dimension": "career" | "health" | "wealth" | "relationships" | "joy" | "learning" | null,
     "energy_cost": 1-10,
