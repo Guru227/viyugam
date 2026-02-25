@@ -2969,9 +2969,9 @@ def main() -> None:
         run_one_shot(" ".join(text_parts))
         return
 
-    # No args → open interactive REPL
-    from viyugam.repl import run_repl
-    run_repl()
+    # No args → open dashboard (default view)
+    from viyugam.dashboard import run_dashboard
+    run_dashboard()
 
 
 if __name__ == "__main__":

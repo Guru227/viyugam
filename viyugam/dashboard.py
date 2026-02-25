@@ -47,39 +47,71 @@ APPROVE_KW  = {"approve", "looks good", "lgtm", "confirmed", "yes", "ok", "okay"
 # ── Style ──────────────────────────────────────────────────────────────────────
 
 STYLE = Style.from_dict({
-    "header":           "bg:#0a0c14 #6666aa",
-    "header.title":     "bg:#0a0c14 #ffffff bold",
-    "header.mode.all":  "bg:#0a0c14 #44aa66 bold",
-    "header.mode.work": "bg:#0a0c14 #ffaa44 bold",
+    # ── Header bar ──
+    "header":           "bg:#1e2030 #b0b8d0",
+    "header.title":     "bg:#1e2030 #ffffff bold",
+    "header.mode.all":  "bg:#1e2030 #44dd88 bold",
+    "header.mode.work": "bg:#1e2030 #ffbb55 bold",
 
-    "tab":              "bg:#0d0f1a #444466",
-    "tab.active":       "bg:#0d0f1a #00d4ff bold",
-    "tab.sep":          "bg:#0d0f1a #222244",
+    # ── Tab bar ──
+    "tab":              "bg:#161825 #8888bb",
+    "tab.active":       "bg:#161825 #44ddff bold",
+    "tab.sep":          "bg:#161825 #3a3a55",
 
-    "sep":              "#1e2035",
-    "div":              "#222244",
+    # ── Structural ──
+    "sep":              "#3a3a55",
+    "div":              "#3a3a55",
 
-    "label":            "#4a4a7a bold",
-    "accent":           "#00d4ff",
-    "done":             "#44aa66",
-    "todo":             "#c8c8e8",
-    "overdue":          "#ff6644",
-    "dim":              "#3a3a5a",
-    "warn":             "#ffaa44",
-    "bar.on":           "#00d4ff",
-    "bar.off":          "#1a1a2e",
+    # ── Content ──
+    "label":            "#aaaaee bold",
+    "accent":           "#44ddff",
+    "done":             "#66dd99",
+    "todo":             "#e8eaff",
+    "overdue":          "#ff7766",
+    "dim":              "#7a7a99",
+    "warn":             "#ffbb55",
+    "bar.on":           "#4499ff",
+    "bar.off":          "#2a2a44",
 
-    "chat.header":      "bg:#0a0c14 #6666aa",
-    "chat.user":        "#00d4ff bold",
-    "chat.system":      "#444466 italic",
-    "chat.spinner":     "#ffaa44",
+    # ── Chat ──
+    "chat.header":      "bg:#1e2030 #9090b8",
+    "chat.user":        "#44ddff bold",
+    "chat.system":      "#7a7a99 italic",
+    "chat.spinner":     "#ffbb55",
 
-    "toolbar":          "bg:#07080f #2a2a4a",
-    "prompt":           "#00d4ff bold",
-    "input.line":       "bg:#07080f #e0e0ff",
+    # ── Input ──
+    "toolbar":          "bg:#161825 #606080",
+    "prompt":           "#44ddff bold",
+    "input.line":       "bg:#161825 #e8eaff",
 })
 
 # ── State ──────────────────────────────────────────────────────────────────────
+
+_WELCOME_HINTS = """\
+  Just type naturally — no commands needed.
+
+  \x1b[96mPlan & tasks\x1b[0m
+    "plan my day"
+    "finished the report"
+    "add task: call dentist tomorrow"
+
+  \x1b[96mLog & reflect\x1b[0m
+    "spent 2000 on groceries"
+    "got salary 80k"
+    "log: had a great workout"
+
+  \x1b[96mDecide & review\x1b[0m
+    "should I take the contract?"
+    "weekly review"
+    "research cloud storage options"
+
+  \x1b[96mNavigate\x1b[0m
+    ← →  switch panels
+    ↑ ↓  scroll panel
+    f    toggle Work / All mode
+    Esc  exit
+"""
+
 
 @dataclass
 class _State:
@@ -88,7 +120,9 @@ class _State:
     scroll_r:    int        = 0
     focus_mode:  str        = "all"      # "all" | "work"
     staging:     bool       = False      # plan staged, awaiting approval
-    chat:        list       = field(default_factory=list)
+    chat:        list       = field(default_factory=lambda: [
+        {"role": "assistant", "ansi": _WELCOME_HINTS},
+    ])
     research:    list       = field(default_factory=list)
     running:     bool       = False
     tick:        int        = 0          # incremented by ticker thread
@@ -792,8 +826,7 @@ def run_dashboard() -> None:
     # ── Toolbar ──
     def _toolbar_tokens() -> list:
         return [("class:toolbar",
-                 "  ← → panel   ↑ ↓ scroll   C-↑/↓ scroll chat   "
-                 "f focus mode   Esc close  ")]
+                 "  ← → panels   ↑ ↓ scroll   f work/all   Esc exit  ")]
 
     def _prompt_prefix(*_) -> FormattedText:
         return FormattedText([("class:prompt", "> ")])
