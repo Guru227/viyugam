@@ -218,11 +218,16 @@ def cmd_plan(args: argparse.Namespace) -> None:
             console.print(f"  [dim]· {e.title}{t}[/dim]")
         if calendar_events:
             console.print()
-        override = Prompt.ask(
-            "Override?", choices=["office", "wfh", "off", ""], default=""
-        )
-        if override:
-            day_type = override
+        # _day_type_override: set by dashboard to skip interactive prompt
+        _day_override = getattr(args, "_day_type_override", None)
+        if _day_override is not None:
+            day_type = _day_override or day_type
+        else:
+            override = Prompt.ask(
+                "Override?", choices=["office", "wfh", "off", ""], default=""
+            )
+            if override:
+                day_type = override
         console.print()
 
     # 1. Auto-process inbox

@@ -378,10 +378,7 @@ def _ai_dispatch(text: str) -> None:
 
         elif action == "show_dashboard":
             from viyugam.dashboard import run_dashboard
-            query = run_dashboard()
-            if query:
-                console.print(f"[dim]> {query}[/dim]")
-                _ai_dispatch(query)
+            run_dashboard()
 
         elif action == "help":
             _show_help()
