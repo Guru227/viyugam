@@ -26,6 +26,7 @@ from typing import Optional
 
 from prompt_toolkit import Application
 from prompt_toolkit.buffer import Buffer
+from prompt_toolkit.filters import Condition
 from prompt_toolkit.formatted_text import ANSI, FormattedText
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.layout import (
@@ -81,7 +82,11 @@ STYLE = Style.from_dict({
 
     # ── Input ──
     "toolbar":          "bg:#161825 #606080",
+    "toolbar.insert":   "bg:#161825 #44ddff bold",
     "prompt":           "#44ddff bold",
+    "prompt.normal":    "#3a3a55",
+    "mode.normal":      "bg:#161825 #3a3a55",
+    "mode.insert":      "bg:#161825 #44ddff bold",
     "input.line":       "bg:#161825 #e8eaff",
 })
 
@@ -120,6 +125,7 @@ class _State:
     scroll_r:    int        = 0
     focus_mode:  str        = "all"      # "all" | "work"
     staging:     bool       = False      # plan staged, awaiting approval
+    mode:        str        = "normal"   # "normal" | "insert"
     chat:        list       = field(default_factory=lambda: [
         {"role": "assistant", "ansi": _WELCOME_HINTS},
     ])
@@ -781,7 +787,10 @@ def run_dashboard() -> None:
                 _cache[key] = _build_research(state.research)
         return _cache[key]
 
-    input_buffer = Buffer(name="dash_input")
+    input_buffer = Buffer(
+        name="dash_input",
+        read_only=Condition(lambda: state.mode == "normal"),
+    )
 
     # ── Header ──
     def _header_tokens() -> list:
@@ -811,7 +820,12 @@ def run_dashboard() -> None:
 
     # ── Chat header (right panel) ──
     def _chat_header_tokens() -> list:
-        return [("class:chat.header", "  Chat  ─────────────────────────────────────────")]
+        mode_sty = "class:mode.insert" if state.mode == "insert" else "class:mode.normal"
+        mode_str = " INSERT " if state.mode == "insert" else " NORMAL "
+        return [
+            ("class:chat.header", "  Chat  "),
+            (mode_sty,            mode_str),
+        ]
 
     # ── Content controls ──
     panel_ctrl = FormattedTextControl(
@@ -825,28 +839,43 @@ def run_dashboard() -> None:
 
     # ── Toolbar ──
     def _toolbar_tokens() -> list:
-        return [("class:toolbar",
-                 "  ← → panels   ↑ ↓ scroll   f work/all   Esc exit  ")]
+        if state.mode == "insert":
+            return [
+                ("class:toolbar",        "  "),
+                ("class:toolbar.insert", "INSERT"),
+                ("class:toolbar",        "   Enter submit   Esc normal mode  "),
+            ]
+        return [
+            ("class:toolbar", "  "),
+            ("class:mode.normal", "NORMAL"),
+            ("class:toolbar", "   ← → panels   ↑ ↓ scroll   f work/all   i type   Esc exit  "),
+        ]
 
     def _prompt_prefix(*_) -> FormattedText:
-        return FormattedText([("class:prompt", "> ")])
+        if state.mode == "insert":
+            return FormattedText([("class:prompt", "> ")])
+        return FormattedText([("class:prompt.normal", "  (i to type)  ")])
 
     # ── Key bindings ──
     kb = KeyBindings()
 
-    @kb.add("left", eager=True)
+    is_normal = Condition(lambda: state.mode == "normal")
+    is_insert = Condition(lambda: state.mode == "insert")
+
+    # ── Normal mode: navigation ──
+    @kb.add("left", eager=True, filter=is_normal)
     def _left(event):
         state.panel = max(0, state.panel - 1)
 
-    @kb.add("right", eager=True)
+    @kb.add("right", eager=True, filter=is_normal)
     def _right(event):
         state.panel = min(len(PANELS) - 1, state.panel + 1)
 
-    @kb.add("up", eager=True)
+    @kb.add("up", eager=True, filter=is_normal)
     def _up(event):
         state.scroll_l[state.panel] = max(0, state.scroll_l[state.panel] - 1)
 
-    @kb.add("down", eager=True)
+    @kb.add("down", eager=True, filter=is_normal)
     def _down(event):
         mx = max(0, len(_panel_lines()) - 5)
         state.scroll_l[state.panel] = min(mx, state.scroll_l[state.panel] + 1)
@@ -859,28 +888,39 @@ def run_dashboard() -> None:
     def _scroll_chat_down(event):
         state.scroll_r = min(max(0, len(state.chat) - 1), state.scroll_r + 1)
 
-    @kb.add("f")
+    @kb.add("f", filter=is_normal)
     def _toggle_focus(event):
-        # Only toggle if input buffer is empty (not mid-typing)
-        if not input_buffer.text:
-            state.focus_mode = "work" if state.focus_mode == "all" else "all"
-            _cache.clear()
+        state.focus_mode = "work" if state.focus_mode == "all" else "all"
+        _cache.clear()
 
-    @kb.add("escape")
+    # ── Normal mode: enter insert ──
+    @kb.add("i", filter=is_normal)
+    @kb.add("/", filter=is_normal)
+    def _enter_insert(event):
+        state.mode = "insert"
+
+    # ── Insert mode: back to normal ──
+    @kb.add("escape", filter=is_insert)
+    def _exit_insert(event):
+        state.mode = "normal"
+        input_buffer.reset()
+
+    # ── Normal mode: Esc / C-d exits ──
+    @kb.add("escape", filter=is_normal)
     @kb.add("c-d")
     def _close(event):
         stop_tick.set()
         event.app.exit()
 
-    @kb.add("enter")
+    @kb.add("enter", filter=is_insert)
     def _enter(event):
         text = input_buffer.text.strip()
         if not text:
-            stop_tick.set()
-            event.app.exit()
+            state.mode = "normal"
             return
 
         input_buffer.reset()
+        state.mode = "normal"
         state.chat.append({"role": "user", "text": text})
         state.scroll_r = max(0, len(state.chat) * 4 - 20)
 
