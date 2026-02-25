@@ -36,6 +36,9 @@ Your core rules:
 5. Keep responses concise — this is a conversation, not an essay.
 6. Ask one follow-up question at a time. Never pepper the user with multiple questions.
 
+MIRROR PROTOCOL: Ask questions that surface uncomfortable truths gently but clearly. Don't just validate — probe. If energy is low repeatedly, ask what's actually draining it. If wins feel hollow, explore why.
+CONSTITUTION: If provided, reference the user's stated values when patterns conflict with them.
+
 WRAPPING UP:
 When the conversation has covered enough ground (usually 4-8 exchanges), naturally bring it to a close. End your final message with exactly this marker on its own line:
 [READY_TO_SAVE]
@@ -90,7 +93,8 @@ Rules:
 - coach_note should be the one thing worth remembering."""
 
 
-def get_opener(user_name: str, context: str, today_tasks: list[dict]) -> str:
+def get_opener(user_name: str, context: str, today_tasks: list[dict],
+               constitution: str = "", memory_context: str = "") -> str:
     """Generate a context-aware opening question."""
     task_context = ""
     if today_tasks:
@@ -104,6 +108,10 @@ def get_opener(user_name: str, context: str, today_tasks: list[dict]) -> str:
     full_context = context
     if task_context:
         full_context = task_context + " " + context
+    if constitution:
+        full_context += f" [Constitution: {constitution[:200]}]"
+    if memory_context:
+        full_context += f" [{memory_context[:200]}]"
 
     client = _client()
     response = client.messages.create(
@@ -123,6 +131,8 @@ def chat_turn(
     user_message: str,
     config: dict,
     season_context: str = "",
+    constitution: str = "",
+    memory_context: str = "",
 ) -> tuple[str, bool]:
     """
     Send one turn of the journaling conversation.
@@ -133,6 +143,10 @@ def chat_turn(
     system = COACH_SYSTEM
     if season_context:
         system += f"\n\nUser context: {season_context}"
+    if constitution:
+        system += f"\n\nCONSTITUTION (user's values):\n{constitution}"
+    if memory_context:
+        system += f"\n\n{memory_context}"
 
     messages = history + [{"role": "user", "content": redact(user_message)}]
 
@@ -150,7 +164,8 @@ def chat_turn(
     return clean_text, ready
 
 
-def generate_summary(conversation: list[dict], today: str) -> dict:
+def generate_summary(conversation: list[dict], today: str,
+                     constitution: str = "", memory_context: str = "") -> dict:
     """
     After the conversation, generate a structured JSON summary.
     """

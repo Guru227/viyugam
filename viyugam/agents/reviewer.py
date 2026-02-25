@@ -55,7 +55,9 @@ Rules:
 - Total session: aim for 6-10 exchanges.
 
 Tone reference: ex-McKinsey strategist who genuinely cares about this person thriving.
-Direct. Warm. No fluff."""
+Direct. Warm. No fluff.
+
+MIRROR PROTOCOL: Be direct and specific. Reference the user's actual history when available. Do not soften uncomfortable truths. Name patterns honestly."""
 
 
 BRIEFING_SYSTEM = """You are generating a data briefing to open a {cadence} review session.
@@ -68,7 +70,9 @@ Structure:
 
 Tone: Clear and direct. A good coach's opening observation — not a report card.
 Length: ~150 words maximum.
-Do NOT ask questions yet. Just present what you see."""
+Do NOT ask questions yet. Just present what you see.
+
+MIRROR PROTOCOL: Be direct. Surface patterns without softening. If the data shows avoidance or drift, name it."""
 
 
 REVIEW_SUMMARY_SYSTEM = """Based on this review conversation, generate a structured summary.
@@ -215,16 +219,36 @@ def _days_old(iso_str: str) -> int:
 
 # ── Review session ─────────────────────────────────────────────────────────────
 
-def generate_briefing(review_data: str, cadence: Cadence) -> str:
+def generate_briefing(
+    review_data: str,
+    cadence: Cadence,
+    constitution: str = "",
+    memory_context: str = "",
+    coherence: dict | None = None,
+    decisions_for_review: list[dict] | None = None,
+) -> str:
     """Generate the opening briefing for the review session."""
     period_map = {"weekly": "week", "monthly": "month", "quarterly": "quarter"}
     period = period_map[cadence]
     client = _client()
+
+    extra_context = ""
+    if constitution:
+        extra_context += f"\nCONSTITUTION:\n{constitution}\n"
+    if memory_context:
+        extra_context += f"\n{memory_context}\n"
+    if coherence and coherence.get("score") is not None:
+        extra_context += f"\nCOHERENCE SCORE: {coherence['score']}/100 — {coherence.get('narrative', '')}\n"
+    if decisions_for_review:
+        extra_context += f"\nPENDING DECISIONS FOR REVIEW: {len(decisions_for_review)}\n"
+
+    content = redact(review_data) + extra_context
+
     response = client.messages.create(
         model="claude-sonnet-4-6",
         max_tokens=400,
         system=BRIEFING_SYSTEM.format(cadence=cadence, period=period),
-        messages=[{"role": "user", "content": redact(review_data)}],
+        messages=[{"role": "user", "content": content}],
     )
     return response.content[0].text.strip()
 
@@ -233,6 +257,10 @@ def review_turn(
     history: list[dict],
     user_message: str,
     cadence: Cadence,
+    constitution: str = "",
+    memory_context: str = "",
+    coherence: dict | None = None,
+    decisions_for_review: list[dict] | None = None,
 ) -> tuple[str, bool]:
     """
     One turn of the review conversation.
@@ -241,10 +269,16 @@ def review_turn(
     client = _client()
     messages = history + [{"role": "user", "content": redact(user_message)}]
 
+    system = _review_system(cadence)
+    if constitution:
+        system += f"\n\nCONSTITUTION:\n{constitution}"
+    if memory_context:
+        system += f"\n\n{memory_context}"
+
     response = client.messages.create(
         model="claude-sonnet-4-6",
         max_tokens=600,
-        system=_review_system(cadence),
+        system=system,
         messages=messages,
     )
 
@@ -287,6 +321,60 @@ def generate_review_summary(
     if text.startswith("```"):
         text = text.split("\n", 1)[1].rsplit("```", 1)[0].strip()
     return json.loads(text)
+
+
+WEEKLY_LETTER_SYSTEM = """You are writing a personal weekly letter to the user — from the perspective of a wise, honest mentor who has been watching their week unfold.
+
+Style:
+- Narrative, not bullet points
+- Warm but direct — you name patterns, not just events
+- 3-4 paragraphs
+- End with one question worth sitting with
+
+Structure:
+1. What happened this week (based on data)
+2. The pattern you're noticing (honest, specific)
+3. What this says about where they're headed
+4. The question
+
+Do NOT be sycophantic. Do NOT just summarise tasks. Find the human story in the data.
+Return plain text, no JSON."""
+
+
+def generate_weekly_letter(
+    review_data,
+    coherence: dict,
+    actuals: list[dict],
+    constitution: str = "",
+    memory_context: str = "",
+) -> str:
+    client = _client()
+    # review_data may be a dict or pre-formatted string
+    if isinstance(review_data, str):
+        review_data_str = review_data[:3000]
+    else:
+        review_data_str = json.dumps(review_data, indent=2)[:3000]
+    content = f"""REVIEW DATA:
+{review_data_str}
+
+COHERENCE SCORE: {coherence.get('score', 'N/A')}/100
+{coherence.get('narrative', '')}
+
+PLANNED VS ACTUAL:
+{json.dumps(actuals, indent=2)}
+
+{f'CONSTITUTION:{chr(10)}{constitution}' if constitution else ''}
+{memory_context}
+
+Write the weekly letter."""
+
+    response = client.messages.create(
+        model="claude-sonnet-4-6",
+        max_tokens=800,
+        system=WEEKLY_LETTER_SYSTEM,
+        messages=[{"role": "user", "content": content}],
+    )
+    return response.content[0].text.strip()
 
 
 def format_review_markdown(

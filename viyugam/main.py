@@ -19,6 +19,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 from datetime import date, datetime
 
@@ -31,7 +32,9 @@ from rich.prompt import Confirm, Prompt
 
 import viyugam.storage as storage
 from viyugam.models import (
-    Task, Project, TaskStatus, ResilienceState, SystemState
+    Task, Project, TaskStatus, ResilienceState, SystemState,
+    CalendarEntry, CalendarEntryType,
+    SlowBurn, Milestone, Budget, Transaction, Decision, ActualRecord,
 )
 
 console = Console()
@@ -128,24 +131,13 @@ def _handle_bankruptcy(state: SystemState) -> None:
 # ── capture ────────────────────────────────────────────────────────────────────
 
 def cmd_capture(args: argparse.Namespace) -> None:
-    state = startup_check()
-    text = " ".join(args.text)
-    if not text.strip():
-        console.print("[red]Nothing to capture.[/red]")
-        return
-
-    item = storage.append_inbox(text)
-    console.print(f"[green]Captured.[/green] [dim](id: {item.id})[/dim]")
-    console.print("[dim]Tip: Just dump thoughts freely — Claude breaks them into tasks during /plan.[/dim]")
-
-    inbox_count = len(storage.get_inbox(unprocessed_only=True))
-    if inbox_count >= 5:
-        console.print(
-            f"[dim]{inbox_count} items in inbox — run [bold]viyugam plan[/bold] to process them.[/dim]"
-        )
-
-    state = storage.touch_active(state)
-    storage.save_state(state)
+    """Deprecated — routes to cmd_log."""
+    console.print("[dim]Note: 'capture' is now 'log'. Routing...[/dim]")
+    text = " ".join(args.text) if hasattr(args, "text") and args.text else ""
+    if text:
+        _log_entry(text)
+    else:
+        cmd_log(args)
 
 
 # ── plan ───────────────────────────────────────────────────────────────────────
@@ -203,6 +195,26 @@ def cmd_plan(args: argparse.Namespace) -> None:
         )
         console.print()
 
+    # ── Schedule context ───────────────────────────────────────────────────────
+    day_type = storage.get_day_type(today, config)
+    calendar_events = storage.get_calendar_entries(today)
+
+    if config.work_schedule:
+        ws = config.work_schedule
+        day_label = {"office": "office day", "wfh": "WFH day", "off": "day off"}[day_type]
+        console.print(f"[dim]Today: {day_label} — {ws.start}–{ws.end}[/dim]")
+        for e in calendar_events:
+            t = f" {e.start_time}" if e.start_time else ""
+            console.print(f"  [dim]· {e.title}{t}[/dim]")
+        if calendar_events:
+            console.print()
+        override = Prompt.ask(
+            "Override?", choices=["office", "wfh", "off", ""], default=""
+        )
+        if override:
+            day_type = override
+        console.print()
+
     # 1. Auto-process inbox
     inbox_items = storage.get_inbox(unprocessed_only=True)
     if inbox_items:
@@ -237,6 +249,10 @@ def cmd_plan(args: argparse.Namespace) -> None:
         _show_nudges(nudges)
         return
 
+    # Load memory + constitution for AI context
+    memory_context = storage.get_memory_context()
+    constitution   = storage.load_constitution()
+
     # 3. Generate schedule
     status_msg = {
         "full":   "Building your schedule...",
@@ -256,6 +272,11 @@ def cmd_plan(args: argparse.Namespace) -> None:
             current_time=current_time,
             mode=mode,
             catch_up_notes=catch_up_notes,
+            work_schedule=config.work_schedule.model_dump() if config.work_schedule else None,
+            day_type=day_type,
+            calendar_events=[e.model_dump() for e in calendar_events],
+            memory_context=memory_context,
+            constitution=constitution,
         )
 
     # 4. Move backlogged tasks
@@ -276,6 +297,19 @@ def cmd_plan(args: argparse.Namespace) -> None:
         and not t.is_habit
     ]
     _render_plan(plan, today, config.user_name, backlog_tasks=backlog_tasks)
+
+    # Update rolling memory
+    summary = f"Planned {len(all_tasks)} tasks, mode={mode}, day_type={day_type}"
+    if plan.get("energy_read"):
+        summary += f". Energy: {plan['energy_read'][:100]}"
+    storage.update_memory_summary(summary, source="plan")
+
+    # Show coherence score
+    coherence = storage.compute_coherence_score(config)
+    if coherence.get("score") is not None:
+        score = coherence["score"]
+        color = "green" if score >= 70 else "yellow" if score >= 45 else "red"
+        console.print(f"  Coherence: [{color}]{score}/100[/{color}]  [dim]{coherence['narrative']}[/dim]")
 
     state = storage.touch_active(state)
     state.last_plan = today
@@ -405,6 +439,12 @@ def _render_plan(plan: dict, today: str, user_name: str, backlog_tasks=None) -> 
                     f"{duration}m",
                     _energy_bar(energy) if energy else "",
                 )
+            elif item_type == "event":
+                sched_table.add_row(
+                    time_str, "◆",
+                    Text(title, style="cyan italic"),
+                    f"{duration}m" if duration else "—", "",
+                )
             else:
                 sched_table.add_row(
                     time_str, "▸",
@@ -481,40 +521,87 @@ def _show_nudges(nudges: list[str]) -> None:
 
 def cmd_done(args: argparse.Namespace) -> None:
     state = startup_check()
-    task_id = args.task_id
+    task_id = getattr(args, "task_id", None)
 
-    task = storage.get_task_by_id(task_id)
+    task = None
+    if task_id:
+        task = storage.get_task_by_id(task_id)
+
     if not task:
-        # Maybe it's something unscheduled — offer to log it
-        console.print(f"[yellow]No task found with id '{task_id}'.[/yellow]")
-        if Confirm.ask("Did you complete something that wasn't on your list?"):
-            title = Prompt.ask("What did you get done?")
-            task = Task(
-                title=title,
-                status=TaskStatus.DONE,
-                scheduled_date=date.today().isoformat(),
-            )
-            storage.save_task(task)
-            console.print(f"[green]Logged:[/green] {task.title}")
-            _handle_unscheduled_completion(task)
-        return
+        if task_id:
+            console.print(f"[yellow]No task found with id '{task_id}'.[/yellow]")
+        # Fall into picker
+        task = _pick_task_for_done()
+        if not task:
+            return
 
+    _complete_task(task, state)
+
+
+def _pick_task_for_done() -> Task | None:
+    """Show today's + recent tasks as a numbered list for quick selection."""
+    today = date.today().isoformat()
+    candidates = [
+        t for t in storage.get_tasks()
+        if t.status == TaskStatus.TODO
+        and (t.scheduled_date == today or t.scheduled_date is None)
+        and not t.is_habit
+    ]
+    if not candidates:
+        candidates = [t for t in storage.get_tasks() if t.status == TaskStatus.TODO and not t.is_habit]
+
+    if not candidates:
+        console.print("[dim]No active tasks found.[/dim]")
+        return None
+
+    tbl = Table(box=box.SIMPLE, show_header=True, header_style="bold dim", padding=(0,1))
+    tbl.add_column("#", style="dim", width=3)
+    tbl.add_column("Title", min_width=28)
+    tbl.add_column("Info", style="dim")
+    for i, t in enumerate(candidates[:15], 1):
+        info = f"{t.estimated_minutes}m"
+        if t.dimension:
+            info = f"{t.dimension.value} · {info}"
+        tbl.add_row(str(i), t.title, info)
+    console.print(tbl)
+
+    raw = Prompt.ask("Which task? (number or Enter to cancel)", default="")
+    if not raw.strip() or not raw.strip().isdigit():
+        return None
+    idx = int(raw.strip()) - 1
+    if 0 <= idx < len(candidates[:15]):
+        return candidates[idx]
+    return None
+
+
+def _complete_task(task: Task, state) -> None:
+    today = date.today().isoformat()
     task.status = TaskStatus.DONE
-
-    # Streak logic for habits
     if task.is_habit:
-        today = date.today().isoformat()
         if task.last_done != today:
             task.streak += 1
             task.last_done = today
-            console.print(
-                f"[green]Done:[/green] {task.title} "
-                f"[dim]· streak {task.streak} {'🔥' if task.streak >= 7 else ''}[/dim]"
-            )
+            console.print(f"[green]Done:[/green] {task.title} [dim]· streak {task.streak}[/dim]")
     else:
         console.print(f"[green]Done:[/green] {task.title}")
 
     storage.save_task(task)
+
+    # Record actual time (skip for habits — they're binary done/not-done)
+    if not task.is_habit:
+        actual_raw = Prompt.ask(
+            f"How long did it actually take? [dim](estimated {task.estimated_minutes}m — Enter to skip)[/dim]",
+            default=""
+        )
+        actual_mins = int(actual_raw.strip()) if actual_raw.strip().isdigit() else None
+        record = ActualRecord(
+            task_id=task.id,
+            task_title=task.title,
+            planned_minutes=task.estimated_minutes,
+            actual_minutes=actual_mins,
+            date=today,
+        )
+        storage.save_actual(record)
 
     state = storage.touch_active(state)
     storage.save_state(state)
@@ -578,13 +665,333 @@ def cmd_status(args: argparse.Namespace) -> None:
     console.print()
 
 
-# ── log ────────────────────────────────────────────────────────────────────────
+# ── calendar ───────────────────────────────────────────────────────────────────
 
-def cmd_log(args: argparse.Namespace) -> None:
-    from viyugam.agents.coach import get_opener, chat_turn, generate_summary, format_journal_markdown
-
+def cmd_calendar(args: argparse.Namespace) -> None:
     state = startup_check()
     config = storage.load_config()
+    today = date.today().isoformat()
+
+    if getattr(args, "add", False):
+        _calendar_add()
+    elif getattr(args, "delete", False):
+        _calendar_delete()
+    else:
+        _calendar_show(today, days_ahead=7, config=config)
+
+
+def _calendar_show(today: str, days_ahead: int, config) -> None:
+    from datetime import timedelta
+
+    type_styles = {
+        "event":   "cyan",
+        "block":   "blue",
+        "workout": "green",
+        "meeting": "yellow",
+    }
+    type_icons = {
+        "event":   "◆",
+        "block":   "■",
+        "workout": "◉",
+        "meeting": "●",
+    }
+
+    console.print()
+    for i in range(days_ahead + 1):
+        d = (date.fromisoformat(today) + timedelta(days=i)).isoformat()
+        day_type = storage.get_day_type(d, config)
+        entries = storage.get_calendar_entries(d)
+
+        if i > 0 and not entries:
+            continue
+
+        dow_label = date.fromisoformat(d).strftime("%a")
+        day_label = {"office": "office", "wfh": "WFH", "off": "off"}.get(day_type, "")
+        title_str = f"[bold]{d}[/bold] [dim]{dow_label} · {day_label}[/dim]"
+
+        if entries:
+            tbl = Table(box=None, show_header=False, padding=(0, 1))
+            tbl.add_column(style="dim", width=6, no_wrap=True)
+            tbl.add_column(width=2, no_wrap=True)
+            tbl.add_column(min_width=22)
+            tbl.add_column(style="dim")
+
+            for e in entries:
+                etype = e.entry_type.value if hasattr(e.entry_type, "value") else str(e.entry_type)
+                style = type_styles.get(etype, "white")
+                icon  = type_icons.get(etype, "·")
+                time_str = e.start_time or ""
+                tbl.add_row(
+                    time_str,
+                    f"[{style}]{icon}[/{style}]",
+                    f"[{style}]{e.title}[/{style}]",
+                    e.notes or "",
+                )
+            content = tbl
+        else:
+            content = "[dim]No events.[/dim]"
+
+        border = "cyan" if i == 0 else "dim"
+        console.print(Panel(content, title=title_str, border_style=border, padding=(0, 1)))
+
+    console.print("[dim]/calendar --add to add an event or block[/dim]")
+    console.print()
+
+
+def _calendar_add() -> None:
+    VALID_DAYS = {"mon", "tue", "wed", "thu", "fri", "sat", "sun"}
+
+    title = Prompt.ask("Title")
+    if not title.strip():
+        console.print("[red]Title required.[/red]")
+        return
+
+    type_str = Prompt.ask(
+        "Type",
+        choices=["event", "block", "workout", "meeting"],
+        default="event",
+    )
+
+    recurring = Prompt.ask("Recurring? (y/n)", default="n").lower().startswith("y")
+
+    recurs_on: list[str] = []
+    entry_date: str | None = None
+
+    if recurring:
+        days_raw = Prompt.ask("Days (comma-separated, e.g. mon,wed,fri)", default="")
+        recurs_on = [d.strip().lower() for d in days_raw.split(",") if d.strip()]
+        invalid = [d for d in recurs_on if d not in VALID_DAYS]
+        if invalid:
+            console.print(f"[red]Invalid day(s): {', '.join(invalid)}. Use mon/tue/wed/thu/fri/sat/sun.[/red]")
+            return
+        if not recurs_on:
+            console.print("[red]Must specify at least one day.[/red]")
+            return
+    else:
+        date_raw = Prompt.ask("Date (YYYY-MM-DD)", default=date.today().isoformat())
+        try:
+            date.fromisoformat(date_raw)
+            entry_date = date_raw
+        except ValueError:
+            console.print("[red]Invalid date format. Use YYYY-MM-DD.[/red]")
+            return
+
+    start_time_raw = Prompt.ask("Start time HH:MM (optional)", default="")
+    start_time: str | None = None
+    if start_time_raw.strip():
+        if re.match(r"^\d{2}:\d{2}$", start_time_raw.strip()):
+            start_time = start_time_raw.strip()
+        else:
+            console.print("[red]Invalid time format. Use HH:MM.[/red]")
+            return
+
+    end_time_raw = Prompt.ask("End time HH:MM (optional)", default="")
+    end_time: str | None = None
+    if end_time_raw.strip():
+        if re.match(r"^\d{2}:\d{2}$", end_time_raw.strip()):
+            end_time = end_time_raw.strip()
+        else:
+            console.print("[red]Invalid time format. Use HH:MM.[/red]")
+            return
+
+    notes_raw = Prompt.ask("Notes (optional)", default="")
+    notes = notes_raw.strip() or None
+
+    entry = CalendarEntry(
+        title=title,
+        entry_type=CalendarEntryType(type_str),
+        recurs_on=recurs_on,
+        date=entry_date,
+        start_time=start_time,
+        end_time=end_time,
+        notes=notes,
+    )
+    storage.save_calendar_entry(entry)
+    console.print(f"[green]Saved.[/green] [dim](id: {entry.id})[/dim]")
+
+
+def _calendar_delete() -> None:
+    """List all calendar entries and prompt to delete one."""
+    import json as _json
+    from viyugam.storage import CALENDAR_FILE
+    raw = _json.loads(CALENDAR_FILE.read_text()) if CALENDAR_FILE.exists() else []
+    if not raw:
+        console.print("[dim]No calendar entries to delete.[/dim]")
+        return
+
+    tbl = Table(box=box.SIMPLE, show_header=True, header_style="bold dim", padding=(0,1))
+    tbl.add_column("#", style="dim", width=3)
+    tbl.add_column("Title", min_width=22)
+    tbl.add_column("When", style="dim")
+    tbl.add_column("ID", style="dim")
+    for i, e in enumerate(raw, 1):
+        when = ", ".join(e.get("recurs_on") or []) or e.get("date", "—")
+        tbl.add_row(str(i), e.get("title", ""), when, e.get("id", ""))
+    console.print(tbl)
+
+    choice = Prompt.ask("Delete which? (number or Enter to cancel)", default="")
+    if not choice.strip() or not choice.strip().isdigit():
+        return
+    idx = int(choice.strip()) - 1
+    if not (0 <= idx < len(raw)):
+        console.print("[red]Out of range.[/red]")
+        return
+    entry_id = raw[idx]["id"]
+    title = raw[idx].get("title", entry_id)
+    if Confirm.ask(f"Delete '{title}'?", default=False):
+        storage.delete_calendar_entry(entry_id)
+        console.print(f"[green]Deleted.[/green]")
+
+
+# ── log ────────────────────────────────────────────────────────────────────────
+
+def _build_config_context(config) -> str:
+    parts = []
+    if config.season:
+        parts.append(f"Season: {config.season.name}, focus: {config.season.focus.value}")
+    if config.work_schedule:
+        parts.append(f"Work: {config.work_schedule.start}-{config.work_schedule.end}")
+    return "; ".join(parts)
+
+
+def _log_entry(text: str, config=None, state=None) -> None:
+    """Route a free-text entry to the right place using AI triage."""
+    from viyugam.agents.chairman import triage_inbox
+
+    if config is None:
+        config = storage.load_config()
+    if state is None:
+        state = storage.load_state()
+
+    if not text.strip():
+        console.print("[red]Nothing to log.[/red]")
+        return
+
+    # Store raw in inbox first
+    item = storage.append_inbox(text)
+
+    # Triage via AI
+    try:
+        with console.status("[dim]Routing...[/dim]"):
+            results = triage_inbox([text], config_context=_build_config_context(config))
+    except Exception as e:
+        console.print(f"[green]Captured to inbox.[/green] [dim](AI routing failed: {e})[/dim]")
+        state = storage.touch_active(state)
+        storage.save_state(state)
+        return
+
+    if not results:
+        console.print("[green]Captured to inbox.[/green]")
+        return
+
+    result = results[0]
+    rtype = result.get("type", "task")
+    title = result.get("title", text[:80])
+
+    storage.mark_inbox_processed([item.id])
+
+    if rtype == "task":
+        task = Task(
+            title=title,
+            dimension=result.get("dimension"),
+            energy_cost=result.get("energy_cost", 5),
+            estimated_minutes=result.get("estimated_minutes", 30),
+            context=result.get("context"),
+            notes=result.get("notes"),
+            scheduled_date=date.today().isoformat(),
+        )
+        storage.save_task(task)
+        dim = task.dimension.value if task.dimension else "—"
+        console.print(f"[green]Task:[/green] {task.title} [dim]· {dim} · {task.estimated_minutes}m (id: {task.id})[/dim]")
+
+    elif rtype == "habit":
+        from viyugam.models import Recurrence
+        task = Task(
+            title=title,
+            is_habit=True,
+            recurrence=Recurrence.DAILY,
+            dimension=result.get("dimension"),
+            energy_cost=result.get("energy_cost", 3),
+            estimated_minutes=result.get("estimated_minutes", 20),
+            notes=result.get("notes"),
+        )
+        storage.save_task(task)
+        console.print(f"[green]Habit:[/green] {task.title} [dim](id: {task.id})[/dim]")
+
+    elif rtype == "goal":
+        from viyugam.models import Goal, Dimension as _Dim
+        dim_str = result.get("dimension", "career")
+        try:
+            dimension = _Dim(dim_str) if dim_str else None
+        except ValueError:
+            dimension = None
+        goal = Goal(title=title, dimension=dimension or _Dim.CAREER)
+        storage.save_goal(goal)
+        console.print(f"[green]Goal:[/green] {goal.title} [dim](id: {goal.id})[/dim]")
+
+    elif rtype == "slow_burn":
+        sb = SlowBurn(title=title, notes=result.get("notes"), dimension=result.get("dimension"))
+        storage.save_slow_burn(sb)
+        console.print(f"[green]Slow burn:[/green] {sb.title} [dim](id: {sb.id})[/dim]")
+
+    elif rtype == "event":
+        entry = CalendarEntry(
+            title=title,
+            entry_type=CalendarEntryType.EVENT,
+            date=date.today().isoformat(),
+            notes=result.get("notes"),
+        )
+        storage.save_calendar_entry(entry)
+        console.print(f"[green]Event:[/green] {entry.title} [dim](id: {entry.id})[/dim]")
+
+    elif rtype == "transaction":
+        txn = Transaction(
+            amount=float(result.get("amount", 0)),
+            category=result.get("category", "general"),
+            description=result.get("description", title),
+        )
+        storage.save_transaction(txn)
+        console.print(f"[green]Transaction:[/green] {txn.description} [dim]{config.currency}{txn.amount}[/dim]")
+
+    elif rtype == "journal":
+        # Just keep in inbox as processed, save to today's journal append
+        existing = storage.load_journal() or ""
+        note = f"\n---\n{text}\n"
+        storage.save_journal(existing + note)
+        console.print(f"[green]Journal note saved.[/green]")
+
+    elif rtype == "review_flag":
+        # Append to a review flags file
+        flags_file = storage.HOME / "review_flags.md"
+        existing = flags_file.read_text() if flags_file.exists() else ""
+        flags_file.write_text(existing + f"\n- [{date.today().isoformat()}] {text}\n")
+        console.print(f"[green]Flagged for review:[/green] {text[:60]}")
+
+    else:
+        console.print(f"[green]Captured.[/green] [dim](type: {rtype})[/dim]")
+
+    state = storage.touch_active(state)
+    storage.save_state(state)
+
+
+def cmd_log(args: argparse.Namespace) -> None:
+    state = startup_check()
+    config = storage.load_config()
+
+    # Check if text was passed directly
+    text_parts = getattr(args, "text", None)
+    if text_parts:
+        text = " ".join(text_parts)
+        _log_entry(text, config=config, state=state)
+        return
+
+    # No text → journal session (existing coach behaviour)
+    _journal_session(args, state, config)
+
+
+def _journal_session(args: argparse.Namespace, state, config) -> None:
+    from viyugam.agents.coach import get_opener, chat_turn, generate_summary, format_journal_markdown
+
     today = date.today().isoformat()
 
     # Check if already logged today
@@ -595,9 +1002,9 @@ def cmd_log(args: argparse.Namespace) -> None:
 
     # Build context for opener
     tasks_today = storage.get_tasks(scheduled_date=today)
-    season_context = ""
-    if config.season:
-        season_context = f"Season: {config.season.name}, focus: {config.season.focus.value}"
+    season_context = _build_config_context(config)
+    constitution = storage.load_constitution()
+    memory_context = storage.get_memory_context()
 
     # Season drift check — surface in log if present
     drift = storage.get_season_drift(config)
@@ -620,8 +1027,10 @@ def cmd_log(args: argparse.Namespace) -> None:
                 user_name=config.user_name,
                 context=season_context,
                 today_tasks=[t.model_dump() for t in tasks_today],
+                constitution=constitution,
+                memory_context=memory_context,
             )
-    except Exception as e:
+    except Exception:
         opener = "How was today?"
 
     console.print(f"[bold cyan]Coach:[/bold cyan] {opener}\n")
@@ -652,6 +1061,8 @@ def cmd_log(args: argparse.Namespace) -> None:
                     user_message=user_input,
                     config=config.model_dump(),
                     season_context=season_context,
+                    constitution=constitution,
+                    memory_context=memory_context,
                 )
         except Exception as e:
             console.print(f"[red]Error:[/red] {e}")
@@ -667,7 +1078,9 @@ def cmd_log(args: argparse.Namespace) -> None:
     if len(history) > 1:
         console.print("\n[dim]Saving your journal...[/dim]")
         try:
-            summary = generate_summary(history, today)
+            summary = generate_summary(history, today,
+                                       constitution=constitution,
+                                       memory_context=memory_context)
             markdown = format_journal_markdown(history, summary, today)
             path = storage.save_journal(markdown, today)
             console.print(f"[green]Saved.[/green] [dim]{path}[/dim]")
@@ -694,6 +1107,430 @@ def cmd_log(args: argparse.Namespace) -> None:
         console.print("[dim]Nothing to save.[/dim]")
 
     console.print()
+
+
+# ── edit ───────────────────────────────────────────────────────────────────────
+
+def cmd_edit(args: argparse.Namespace) -> None:
+    state = startup_check()
+    task_id = getattr(args, "task_id", None)
+    task = storage.get_task_by_id(task_id) if task_id else None
+    if not task:
+        console.print("[yellow]Task not found.[/yellow]")
+        return
+
+    console.print(f"\n[dim]Editing:[/dim] {task.title}")
+    new_title    = Prompt.ask("Title", default=task.title)
+    new_energy   = Prompt.ask("Energy (1-10)", default=str(task.energy_cost))
+    new_minutes  = Prompt.ask("Estimated minutes", default=str(task.estimated_minutes))
+    new_date     = Prompt.ask("Scheduled date (YYYY-MM-DD or Enter to keep)", default=task.scheduled_date or "")
+    new_notes    = Prompt.ask("Notes", default=task.notes or "")
+
+    task.title             = new_title
+    task.energy_cost       = int(new_energy) if new_energy.isdigit() else task.energy_cost
+    task.estimated_minutes = int(new_minutes) if new_minutes.isdigit() else task.estimated_minutes
+    if new_date:
+        try:
+            date.fromisoformat(new_date)
+            task.scheduled_date = new_date
+        except ValueError:
+            console.print("[yellow]Invalid date, keeping original.[/yellow]")
+    task.notes = new_notes or None
+    storage.save_task(task)
+    console.print(f"[green]Updated.[/green] {task.title}")
+
+    state = storage.touch_active(state)
+    storage.save_state(state)
+
+
+# ── reschedule ─────────────────────────────────────────────────────────────────
+
+def cmd_reschedule(args: argparse.Namespace) -> None:
+    import datetime as _dt
+    state = startup_check()
+    task_id  = getattr(args, "task_id", None)
+    new_date = getattr(args, "new_date", None)
+
+    task = storage.get_task_by_id(task_id) if task_id else None
+    if not task:
+        console.print("[yellow]Task not found.[/yellow]")
+        return
+
+    if not new_date:
+        new_date = Prompt.ask("Reschedule to (YYYY-MM-DD, 'tomorrow', 'next-week')",
+                              default=(date.today() + _dt.timedelta(days=1)).isoformat())
+
+    # Resolve shortcuts
+    if new_date == "tomorrow":
+        new_date = (date.today() + _dt.timedelta(days=1)).isoformat()
+    elif new_date == "next-week":
+        new_date = (date.today() + _dt.timedelta(days=7)).isoformat()
+
+    try:
+        date.fromisoformat(new_date)
+    except ValueError:
+        console.print("[red]Invalid date.[/red]")
+        return
+
+    old_date = task.scheduled_date
+    task.scheduled_date = new_date
+    task.status = TaskStatus.TODO
+    storage.save_task(task)
+    console.print(f"[green]Rescheduled:[/green] {task.title} [dim]{old_date} → {new_date}[/dim]")
+
+    state = storage.touch_active(state)
+    storage.save_state(state)
+
+
+# ── snooze ─────────────────────────────────────────────────────────────────────
+
+def cmd_snooze(args: argparse.Namespace) -> None:
+    import datetime as _dt
+    startup_check()
+    task_id = getattr(args, "task_id", None)
+    task = storage.get_task_by_id(task_id) if task_id else None
+    if not task:
+        console.print("[yellow]Task not found.[/yellow]")
+        return
+    tomorrow = (date.today() + _dt.timedelta(days=1)).isoformat()
+    task.scheduled_date = tomorrow
+    task.status = TaskStatus.TODO
+    storage.save_task(task)
+    console.print(f"[green]Snoozed:[/green] {task.title} [dim]→ {tomorrow}[/dim]")
+
+
+# ── backlog ────────────────────────────────────────────────────────────────────
+
+def cmd_backlog(args: argparse.Namespace) -> None:
+    startup_check()
+    all_tasks = storage.get_tasks()
+    backlog = [
+        t for t in all_tasks
+        if t.status in (TaskStatus.TODO, TaskStatus.BACKLOG)
+        and not t.is_habit
+        and (not t.scheduled_date or t.scheduled_date < date.today().isoformat())
+    ]
+
+    if not backlog:
+        console.print("\n[dim]Backlog is empty.[/dim]\n")
+        return
+
+    console.print()
+    tbl = Table(box=box.SIMPLE, show_header=True, header_style="bold dim", padding=(0,1))
+    tbl.add_column("ID", style="dim", width=8)
+    tbl.add_column("Title", min_width=28)
+    tbl.add_column("Dim", style="dim", width=12)
+    tbl.add_column("Time", justify="right", style="dim", width=5)
+    for t in backlog[:30]:
+        dim = t.dimension.value if t.dimension else "—"
+        tbl.add_row(t.id, t.title, dim, f"{t.estimated_minutes}m")
+
+    console.print(Panel(tbl, title=f"[bold]Backlog[/bold] [dim]({len(backlog)} items)[/dim]", border_style="dim", padding=(0,1)))
+
+    if len(backlog) > 30:
+        console.print(f"[dim]  ... and {len(backlog)-30} more[/dim]")
+
+    # Quick actions
+    console.print()
+    raw = Prompt.ask("Schedule an item? Enter ID (or Enter to exit)", default="")
+    if not raw.strip():
+        return
+    task = storage.get_task_by_id(raw.strip())
+    if not task:
+        console.print("[red]Not found.[/red]")
+        return
+    new_date = Prompt.ask("Schedule for", default=date.today().isoformat())
+    try:
+        date.fromisoformat(new_date)
+    except ValueError:
+        console.print("[red]Invalid date.[/red]")
+        return
+    task.scheduled_date = new_date
+    task.status = TaskStatus.TODO
+    storage.save_task(task)
+    console.print(f"[green]Scheduled:[/green] {task.title} → {new_date}")
+
+
+# ── milestones ─────────────────────────────────────────────────────────────────
+
+def cmd_milestones(args: argparse.Namespace) -> None:
+    startup_check()
+    config = storage.load_config()
+
+    # Mark a milestone done
+    done_id = getattr(args, "done", None)
+    if done_id:
+        milestones = storage.get_milestones()
+        match = next((m for m in milestones if m.id == done_id or m.id.startswith(done_id)), None)
+        if not match:
+            console.print(f"[red]Milestone not found:[/red] {done_id}")
+            return
+        match.is_done = True
+        storage.save_milestone(match)
+        console.print(f"[green]Done:[/green] {match.title}")
+        return
+
+    if getattr(args, "add", False):
+        title    = Prompt.ask("Milestone title")
+        goals    = storage.get_goals()
+        goal_id  = None
+        if goals:
+            console.print("\n[dim]Goals:[/dim]")
+            for i, g in enumerate(goals, 1):
+                console.print(f"  {i}. {g.title} [dim]({g.dimension.value})[/dim]")
+            raw = Prompt.ask("Link to goal? (number or Enter to skip)", default="")
+            if raw.strip().isdigit():
+                idx = int(raw.strip()) - 1
+                if 0 <= idx < len(goals):
+                    goal_id = goals[idx].id
+        due_date = Prompt.ask("Due date (YYYY-MM-DD or Enter)", default="")
+        notes    = Prompt.ask("Notes (optional)", default="")
+        m = Milestone(title=title, goal_id=goal_id,
+                      due_date=due_date or None, notes=notes or None)
+        storage.save_milestone(m)
+        console.print(f"[green]Milestone added:[/green] {m.title} [dim](id: {m.id})[/dim]")
+        return
+
+    # List milestones grouped by goal
+    milestones = storage.get_milestones()
+    goals = {g.id: g for g in storage.get_goals(active_only=False)}
+
+    if not milestones:
+        console.print("\n[dim]No milestones yet.[/dim]\n"
+                      "Add one: [bold]viyugam milestones --add[/bold]\n")
+        return
+
+    console.print()
+    by_goal: dict[str | None, list] = {}
+    for m in milestones:
+        by_goal.setdefault(m.goal_id, []).append(m)
+
+    for gid, ms in by_goal.items():
+        goal_title = goals[gid].title if gid and gid in goals else "Unlinked"
+        console.print(f"  [bold]{goal_title}[/bold]")
+        for m in ms:
+            done_mark = "[green]done[/green]" if m.is_done else "[dim]o[/dim]"
+            due = f" [dim]due {m.due_date}[/dim]" if m.due_date else ""
+            console.print(f"  {done_mark} [dim]{m.id}[/dim]  {m.title}{due}")
+        console.print()
+
+
+# ── slow burns ─────────────────────────────────────────────────────────────────
+
+def cmd_slow_burns(args: argparse.Namespace) -> None:
+    """Browse and manage the Slow Burns list."""
+    startup_check()
+
+    if getattr(args, "add", False):
+        from viyugam.models import Dimension as _Dim
+        title = Prompt.ask("What's the slow burn?")
+        if not title.strip():
+            return
+        dims = [d.value for d in _Dim]
+        dim_raw = Prompt.ask(f"Dimension ({'/'.join(dims)})", default="")
+        dimension = _Dim(dim_raw.lower()) if dim_raw.lower() in dims else None
+        notes = Prompt.ask("Notes (optional)", default="") or None
+        item = SlowBurn(title=title.strip(), dimension=dimension, notes=notes)
+        storage.save_slow_burn(item)
+        console.print(f"[green]Added:[/green] {item.title} [dim](id: {item.id})[/dim]")
+        return
+
+    items = storage.get_slow_burns()
+    if not items:
+        console.print("\n[dim]No slow burns yet.[/dim]\n"
+                      "These are long-horizon aspirations — things worth chipping away at.\n"
+                      "Add one: [bold]/slow-burns --add[/bold]\n")
+        return
+
+    console.print()
+    tbl = Table(box=box.SIMPLE, show_header=True, header_style="bold dim", padding=(0,1))
+    tbl.add_column("ID", style="dim", width=10)
+    tbl.add_column("Title", min_width=30)
+    tbl.add_column("Dimension", style="cyan", width=14)
+    tbl.add_column("Last chipped", style="dim", width=13)
+    for item in items:
+        dim = item.dimension.value if item.dimension else "—"
+        last = item.last_chipped or "never"
+        tbl.add_row(item.id, item.title, dim, last)
+    console.print(tbl)
+    console.print()
+
+
+# ── decisions ──────────────────────────────────────────────────────────────────
+
+def cmd_decisions(args: argparse.Namespace) -> None:
+    """Browse past boardroom decisions."""
+    startup_check()
+
+    decisions = storage.get_decisions()
+    if not decisions:
+        console.print("\n[dim]No decisions recorded yet.[/dim]\n"
+                      "Run [bold]/think[/bold] to put a proposal through the boardroom.\n")
+        return
+
+    console.print()
+    for d in sorted(decisions, key=lambda x: x.created_at, reverse=True):
+        outcome_style = {
+            "approved":    "green",
+            "rejected":    "red",
+            "conditional": "yellow",
+        }.get(d.outcome, "white")
+        title = f"[bold]{d.proposal[:60]}[/bold]  [{outcome_style}]{d.outcome.upper()}[/{outcome_style}]"
+        if d.actual_outcome:
+            body = f"{d.reasoning}\n\n[dim]Actual outcome:[/dim] {d.actual_outcome}"
+        else:
+            body = d.reasoning
+            if d.condition:
+                body += f"\n[dim]Condition:[/dim] {d.condition}"
+        console.print(Panel(
+            body,
+            title=title,
+            subtitle=f"[dim]{d.created_at[:10]} · {d.id}[/dim]",
+            border_style="dim",
+            padding=(0, 2),
+        ))
+    console.print()
+
+
+# ── finance ────────────────────────────────────────────────────────────────────
+
+def cmd_finance(args: argparse.Namespace) -> None:
+    startup_check()
+    config = storage.load_config()
+    sub = getattr(args, "sub", None)
+
+    if sub == "budget":
+        _finance_budget(args)
+    elif sub == "log":
+        _finance_log(args)
+    elif sub == "summary":
+        _finance_summary(config)
+    else:
+        _finance_summary(config)
+
+
+def _finance_summary(config) -> None:
+    summaries = storage.get_budget_summary()
+    recent_txns = storage.get_transactions()[-10:]
+
+    console.print()
+    if summaries:
+        tbl = Table(box=box.SIMPLE, show_header=True, header_style="bold dim", padding=(0,1))
+        tbl.add_column("Budget", min_width=18)
+        tbl.add_column("Limit", justify="right", style="dim")
+        tbl.add_column("Spent", justify="right")
+        tbl.add_column("Left", justify="right", style="green")
+        tbl.add_column("%", justify="right", style="dim")
+        for b in summaries:
+            currency = config.currency
+            color = "red" if b["pct"] > 90 else "yellow" if b["pct"] > 70 else "green"
+            tbl.add_row(
+                b["name"],
+                f"{currency}{b['total_limit']:,.0f}",
+                f"[{color}]{currency}{b['spent']:,.0f}[/{color}]",
+                f"{currency}{b['remaining']:,.0f}",
+                f"{b['pct']}%",
+            )
+        console.print(Panel(tbl, title="[bold]Budgets[/bold]", border_style="dim", padding=(0,1)))
+    else:
+        console.print("[dim]No budgets set up. Run: viyugam finance budget[/dim]")
+
+    if recent_txns:
+        console.print("\n[bold dim]Recent transactions:[/bold dim]")
+        for t in recent_txns[-5:]:
+            console.print(f"  [dim]{t.occurred_at[:10]}[/dim]  {t.description}  [cyan]{config.currency}{t.amount:,.0f}[/cyan]")
+    console.print()
+
+
+def _finance_budget(args) -> None:
+    import calendar as _cal
+    name    = Prompt.ask("Budget name (e.g. Monthly OpEx)")
+    limit   = Prompt.ask("Total limit")
+    start   = Prompt.ask("Period start (YYYY-MM-DD)", default=date.today().replace(day=1).isoformat())
+    end_raw = Prompt.ask("Period end (YYYY-MM-DD)", default="")
+    if not end_raw:
+        today = date.today()
+        last_day = _cal.monthrange(today.year, today.month)[1]
+        end_raw = today.replace(day=last_day).isoformat()
+    try:
+        b = Budget(name=name, total_limit=float(limit), period_start=start, period_end=end_raw)
+        storage.save_budget(b)
+        console.print(f"[green]Budget created:[/green] {b.name} [dim](id: {b.id})[/dim]")
+    except Exception as e:
+        console.print(f"[red]Error:[/red] {e}")
+
+
+def _finance_log(args) -> None:
+    desc    = Prompt.ask("Description")
+    amount  = Prompt.ask("Amount")
+    cat     = Prompt.ask("Category", default="general")
+    budgets = storage.get_budgets()
+    budget_id = None
+    if budgets:
+        console.print("\n[dim]Budgets:[/dim]")
+        for i, b in enumerate(budgets, 1):
+            console.print(f"  {i}. {b.name} [dim](left: {b.total_limit - b.spent:,.0f})[/dim]")
+        raw = Prompt.ask("Link to budget? (number or Enter to skip)", default="")
+        if raw.strip().isdigit():
+            idx = int(raw.strip()) - 1
+            if 0 <= idx < len(budgets):
+                budget_id = budgets[idx].id
+    try:
+        t = Transaction(amount=float(amount), category=cat, description=desc, budget_id=budget_id)
+        storage.save_transaction(t)
+        console.print(f"[green]Transaction logged:[/green] {t.description}")
+    except Exception as e:
+        console.print(f"[red]Error:[/red] {e}")
+
+
+# ── constitution ───────────────────────────────────────────────────────────────
+
+def cmd_constitution(args: argparse.Namespace) -> None:
+    startup_check()
+    existing = storage.load_constitution()
+
+    if existing:
+        console.print()
+        console.print(Panel(existing, title="[bold]Your Constitution[/bold]", border_style="cyan", padding=(1,2)))
+        if not Confirm.ask("\nEdit it?", default=False):
+            return
+
+    console.print(Panel(
+        "[bold]Your Constitution[/bold]\n\n"
+        "This is your values document. Write:\n"
+        "- Core values\n"
+        "- Non-negotiables (e.g. 'no work after 9pm')\n"
+        "- Life principles\n"
+        "- What you're optimising for\n\n"
+        "[dim]The AI references this for all decisions.[/dim]",
+        border_style="cyan", padding=(1,2)
+    ))
+    console.print("[dim]Type your constitution (blank line + Enter when done):[/dim]\n")
+
+    lines = []
+    try:
+        while True:
+            line = input()
+            lines.append(line)
+            if len(lines) >= 2 and lines[-1] == "" and lines[-2] == "":
+                break
+    except EOFError:
+        pass
+
+    content = "\n".join(lines).strip()
+    if content:
+        storage.save_constitution(content)
+        # Mark constitution as existing so agents load it
+        try:
+            import yaml
+            raw = yaml.safe_load(storage.CONFIG_FILE.read_text()) or {}
+            raw["constitution_exists"] = True
+            storage.CONFIG_FILE.write_text(yaml.dump(raw, allow_unicode=True))
+        except Exception:
+            pass
+        console.print("\n[green]Constitution saved.[/green]")
+    else:
+        console.print("[yellow]Nothing saved.[/yellow]")
 
 
 # ── think ───────────────────────────────────────────────────────────────────────
@@ -750,6 +1587,7 @@ def _run_think(
                 goals=[g.model_dump() for g in goals],
                 actual_season=actual_season,
                 revisit_context=revisit_context,
+                run_premortem=True,
             )
         except Exception as e:
             console.print(f"[red]Boardroom error:[/red] {e}")
@@ -789,6 +1627,16 @@ def _run_think(
         border_style="dim",
         padding=(1, 2),
     ))
+
+    # Save decision record
+    decision_record = Decision(
+        proposal=proposal,
+        outcome=consensus,
+        reasoning=summary,
+        voices=result.get("transcript", []),
+        condition=condition,
+    )
+    storage.save_decision(decision_record)
 
     # Decision
     console.print()
@@ -1056,6 +1904,42 @@ def cmd_review(args: argparse.Namespace) -> None:
 
         except Exception as e:
             console.print(f"[yellow]Could not save summary:[/yellow] {e}")
+
+        # Weekly letter (weekly cadence only)
+        if cadence == "weekly":
+            try:
+                from viyugam.agents.reviewer import generate_weekly_letter
+                coherence = storage.compute_coherence_score(config, days=7)
+                actuals   = [storage.get_plan_vs_actual(
+                    (date.today() - __import__("datetime").timedelta(days=i)).isoformat()
+                ) for i in range(7)]
+                actuals   = [a for a in actuals if a]
+                constitution = storage.load_constitution()
+                memory_ctx   = storage.get_memory_context()
+                letter = generate_weekly_letter(
+                    review_data=review_data,
+                    coherence=coherence,
+                    actuals=actuals,
+                    constitution=constitution,
+                    memory_context=memory_ctx,
+                )
+                console.print()
+                console.print(Panel(letter, title="[bold cyan]Your Week[/bold cyan]",
+                                    border_style="cyan", padding=(1,2)))
+            except Exception as e:
+                console.print(f"[dim]Weekly letter skipped: {e}[/dim]")
+
+        # Surface decisions due for review
+        pending_decisions = storage.get_decisions_for_review(days=90)
+        if pending_decisions:
+            console.print(f"\n[yellow]{len(pending_decisions)} decision(s) from the past 90 days need outcome recording:[/yellow]")
+            for d in pending_decisions[:3]:
+                console.print(f"  [dim]{d.created_at[:10]}[/dim] {d.proposal[:60]} → [{d.outcome}]")
+                outcome = Prompt.ask("  Actual outcome", default="skip")
+                if outcome != "skip":
+                    d.actual_outcome = outcome
+                    d.revisited_at = date.today().isoformat()
+                    storage.save_decision(d)
 
         # Quarterly: offer season reset
         if cadence == "quarterly" and config.season:
@@ -1340,6 +2224,16 @@ def cmd_setup(args: argparse.Namespace) -> None:
     season_focus     = Prompt.ask("Primary focus", default=default_season_focus)
     season_secondary = Prompt.ask("Secondary focus (optional)", default=default_season_secondary)
 
+    console.print("\n[bold]Work schedule[/bold] — for planning awareness:")
+    console.print("[dim]Affects how Claude schedules tasks during office vs WFH days.[/dim]")
+    existing_ws = existing.work_schedule
+    work_start  = Prompt.ask("Work start?", default=existing_ws.start if existing_ws else "09:00")
+    work_end    = Prompt.ask("Work end?",   default=existing_ws.end   if existing_ws else "17:30")
+    office_raw  = Prompt.ask("Office days? (e.g. mon,tue,thu)", default=",".join(existing_ws.office_days) if existing_ws else "mon,tue,thu")
+    wfh_raw     = Prompt.ask("WFH days? (e.g. wed,fri)",        default=",".join(existing_ws.wfh_days)   if existing_ws else "wed,fri")
+    office_days = [d.strip().lower() for d in office_raw.split(",") if d.strip()]
+    wfh_days    = [d.strip().lower() for d in wfh_raw.split(",")    if d.strip()]
+
     # Build config — preserve api_key if it was already set
     config_data = {
         "user_name":      name,
@@ -1354,6 +2248,13 @@ def cmd_setup(args: argparse.Namespace) -> None:
     }
     if season_secondary:
         config_data["season"]["secondary"] = season_secondary
+    if office_days or wfh_days:
+        config_data["work_schedule"] = {
+            "start": work_start, "end": work_end,
+            "office_days": office_days, "wfh_days": wfh_days,
+        }
+    elif existing_ws:
+        config_data["work_schedule"] = existing_ws.model_dump()
     if existing.api_key:
         config_data["api_key"] = existing.api_key  # always preserve
 
@@ -1385,7 +2286,7 @@ def main() -> None:
     sub = parser.add_subparsers(dest="command", required=False)
 
     # capture
-    p_capture = sub.add_parser("capture", help="Capture a thought to your inbox")
+    p_capture = sub.add_parser("capture", help="Capture a thought to your inbox (deprecated: use log)")
     p_capture.add_argument("text", nargs="+", help="The thought to capture")
 
     # plan
@@ -1394,14 +2295,46 @@ def main() -> None:
 
     # done
     p_done = sub.add_parser("done", help="Mark a task complete")
-    p_done.add_argument("task_id", help="Task ID (or partial)")
+    p_done.add_argument("task_id", nargs="?", help="Task ID (or partial) — omit for picker")
 
     # status
     p_status = sub.add_parser("status", help="Quick overview of today")
 
-    # log
-    p_log = sub.add_parser("log", help="Evening journaling session")
-    p_log.add_argument("--force", action="store_true", help="Start new session even if already logged today")
+    # log (replaces capture)
+    p_log_new = sub.add_parser("log", help="Universal input — routes anything to the right place")
+    p_log_new.add_argument("text", nargs="*", help="What to log (omit for journal session)")
+    p_log_new.add_argument("--force", action="store_true", help="Force new journal session even if logged today")
+
+    # edit
+    p_edit = sub.add_parser("edit", help="Edit a task")
+    p_edit.add_argument("task_id", help="Task ID")
+
+    # reschedule
+    p_reschedule = sub.add_parser("reschedule", help="Move a task to another date")
+    p_reschedule.add_argument("task_id", help="Task ID")
+    p_reschedule.add_argument("new_date", nargs="?", help="YYYY-MM-DD, 'tomorrow', or 'next-week'")
+
+    # snooze
+    p_snooze = sub.add_parser("snooze", help="Push a task to tomorrow")
+    p_snooze.add_argument("task_id", help="Task ID")
+
+    # backlog
+    p_backlog = sub.add_parser("backlog", help="Browse and schedule from backlog")
+
+    # milestones
+    p_milestones = sub.add_parser("milestones", help="View and add milestones")
+    p_milestones.add_argument("--add", action="store_true", help="Add a new milestone")
+    p_milestones.add_argument("--done", metavar="ID", help="Mark a milestone done")
+
+    # finance
+    p_finance = sub.add_parser("finance", help="Budget and spending overview")
+    p_finance_sub = p_finance.add_subparsers(dest="sub")
+    p_finance_sub.add_parser("budget", help="Create a budget")
+    p_finance_sub.add_parser("log", help="Log a transaction")
+    p_finance_sub.add_parser("summary", help="Show summary")
+
+    # constitution
+    p_constitution = sub.add_parser("constitution", help="View and edit your values document")
 
     # think
     p_think = sub.add_parser("think", help="Decision gateway. No args = review someday list")
@@ -1423,6 +2356,18 @@ def main() -> None:
     p_research = sub.add_parser("research", help="Research a topic using web search")
     p_research.add_argument("topic", nargs="+", help="The topic to research")
 
+    # calendar
+    p_calendar = sub.add_parser("calendar", help="View and add calendar events/blocks")
+    p_calendar.add_argument("--add", action="store_true", help="Add a new calendar entry")
+    p_calendar.add_argument("--delete", action="store_true", help="Delete a calendar entry")
+
+    # slow-burns
+    p_slow_burns = sub.add_parser("slow-burns", help="Browse long-horizon aspirations")
+    p_slow_burns.add_argument("--add", action="store_true", help="Add a new slow burn")
+
+    # decisions
+    p_decisions = sub.add_parser("decisions", help="Browse past boardroom decisions")
+
     # setup
     p_setup = sub.add_parser("setup", help="First-run configuration")
 
@@ -1441,16 +2386,26 @@ def main() -> None:
             sys.exit(1)
 
     _dispatch = {
-        "capture":  cmd_capture,
-        "plan":     cmd_plan,
-        "done":     cmd_done,
-        "status":   cmd_status,
-        "log":      cmd_log,
-        "think":    cmd_think,
-        "review":   cmd_review,
-        "goals":    cmd_goals,
-        "research": cmd_research,
-        "setup":    cmd_setup,
+        "capture":     cmd_capture,
+        "plan":        cmd_plan,
+        "done":        cmd_done,
+        "status":      cmd_status,
+        "calendar":    cmd_calendar,
+        "log":         cmd_log,
+        "edit":        cmd_edit,
+        "reschedule":  cmd_reschedule,
+        "snooze":      cmd_snooze,
+        "backlog":     cmd_backlog,
+        "milestones":  cmd_milestones,
+        "slow-burns":  cmd_slow_burns,
+        "decisions":   cmd_decisions,
+        "finance":     cmd_finance,
+        "constitution": cmd_constitution,
+        "think":       cmd_think,
+        "review":      cmd_review,
+        "goals":       cmd_goals,
+        "research":    cmd_research,
+        "setup":       cmd_setup,
     }
     _dispatch[args.command](args)
 

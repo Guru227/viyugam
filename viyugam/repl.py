@@ -44,32 +44,50 @@ def _show_greeting() -> None:
 
 COMMANDS: dict[str, str] = {
     "plan":    "Build today's schedule",
-    "capture": "Add a thought to inbox          /capture <text>",
-    "c":       "Quick capture                  /c <text>",
+    "log":     "Universal input — routes task/journal/habit/goal/event  /log <text>",
     "done":    "Mark a task complete            /done <id>",
-    "log":     "Evening journal session",
+    "edit":    "Edit a task                              /edit <id>",
+    "reschedule": "Move task to another date                /reschedule <id> [date]",
+    "snooze":  "Push task to tomorrow                    /snooze <id>",
+    "backlog":  "Browse and schedule from backlog",
+    "milestones": "View and add milestones          /milestones [--add] [--done <id>]",
+    "slow-burns": "Long-horizon aspirations          /slow-burns [--add]",
+    "decisions": "Browse past boardroom decisions",
+    "finance":  "Budget and spending overview",
+    "constitution": "View/edit your values document",
     "think":   "Boardroom debate                /think <proposal>  (no args = someday list)",
     "review":   "Weekly / monthly / quarterly review",
     "goals":    "View and manage goals",
     "research": "Research a topic using web search   /research <topic>",
     "status":   "Quick overview of today",
+    "calendar": "View/add/delete calendar events    /calendar [--add|--delete]",
     "setup":    "Update configuration",
     "help":     "Show this help",
     "exit":     "Exit Viyugam",
+    "capture":  "[dim]Deprecated — use /log[/dim]",
 }
 
 # All completions including flags — shown when user types /
 _COMPLETIONS = [
     "/plan", "/plan --replan",
     "/capture ",
-    "/c ",
     "/done ",
-    "/log", "/log --force",
+    "/log ", "/log",
+    "/edit ",
+    "/reschedule ", "/reschedule ",
+    "/snooze ",
+    "/backlog",
+    "/milestones", "/milestones --add", "/milestones --done ",
+    "/finance", "/finance budget", "/finance log", "/finance summary",
+    "/constitution",
     "/think", "/think ",
     "/review", "/review --weekly", "/review --monthly", "/review --quarterly",
     "/goals", "/goals --add ",
     "/research ",
     "/status",
+    "/calendar", "/calendar --add", "/calendar --delete",
+    "/slow-burns", "/slow-burns --add",
+    "/decisions",
     "/setup",
     "/help",
     "/exit",
@@ -170,9 +188,12 @@ def _pick_task():
 def _dispatch(line: str) -> None:
     """Parse a slash command line and call the appropriate cmd_* function."""
     from viyugam.main import (
-        cmd_capture, cmd_plan, cmd_done, cmd_log,
+        cmd_capture, cmd_plan, cmd_done, cmd_log, cmd_edit,
+        cmd_reschedule, cmd_snooze, cmd_backlog, cmd_milestones,
+        cmd_slow_burns, cmd_decisions,
+        cmd_finance, cmd_constitution,
         cmd_think, cmd_review, cmd_goals, cmd_status, cmd_setup,
-        cmd_research, _check_api_key,
+        cmd_research, cmd_calendar, _check_api_key,
     )
 
     # Strip leading slash
@@ -207,13 +228,44 @@ def _dispatch(line: str) -> None:
         cmd_capture(argparse.Namespace(text=rest))
 
     elif cmd == "done":
-        if not rest:
-            console.print("[yellow]Usage:[/yellow] /done <task-id>")
-            return
-        cmd_done(argparse.Namespace(task_id=rest[0]))
+        task_id = rest[0] if rest else None
+        cmd_done(argparse.Namespace(task_id=task_id))
 
     elif cmd == "log":
-        cmd_log(argparse.Namespace(force="--force" in flags))
+        if not _check_api_key():
+            return
+        cmd_log(argparse.Namespace(text=rest if rest else None, force="--force" in flags))
+
+    elif cmd == "edit":
+        if not rest:
+            console.print("[yellow]Usage:[/yellow] /edit <task-id>")
+            return
+        cmd_edit(argparse.Namespace(task_id=rest[0]))
+
+    elif cmd == "reschedule":
+        if not rest:
+            console.print("[yellow]Usage:[/yellow] /reschedule <task-id> [date]")
+            return
+        cmd_reschedule(argparse.Namespace(
+            task_id=rest[0],
+            new_date=rest[1] if len(rest) > 1 else None,
+        ))
+
+    elif cmd == "snooze":
+        if not rest:
+            console.print("[yellow]Usage:[/yellow] /snooze <task-id>")
+            return
+        cmd_snooze(argparse.Namespace(task_id=rest[0]))
+
+    elif cmd == "backlog":
+        cmd_backlog(argparse.Namespace())
+
+    elif cmd == "finance":
+        sub = rest[0] if rest and rest[0] in ("budget", "log", "summary") else "summary"
+        cmd_finance(argparse.Namespace(sub=sub))
+
+    elif cmd == "constitution":
+        cmd_constitution(argparse.Namespace())
 
     elif cmd == "think":
         if not rest:
@@ -261,6 +313,26 @@ def _dispatch(line: str) -> None:
 
     elif cmd == "status":
         cmd_status(argparse.Namespace())
+
+    elif cmd == "calendar":
+        add = "--add" in flags
+        delete = "--delete" in flags
+        cmd_calendar(argparse.Namespace(add=add, delete=delete))
+
+    elif cmd in ("slow-burns", "slowburns"):
+        cmd_slow_burns(argparse.Namespace(add="--add" in flags))
+
+    elif cmd == "decisions":
+        cmd_decisions(argparse.Namespace())
+
+    elif cmd == "milestones":
+        done_id = None
+        add = "--add" in flags
+        if "--done" in rest:
+            idx = rest.index("--done")
+            if idx + 1 < len(rest):
+                done_id = rest[idx + 1]
+        cmd_milestones(argparse.Namespace(add=add, done=done_id))
 
     elif cmd == "setup":
         cmd_setup(argparse.Namespace())

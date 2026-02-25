@@ -64,7 +64,9 @@ Return ONLY a JSON object:
   "summary": "One sentence synthesis of what matters most here.",
   "condition": "If conditional: what needs to be true before proceeding. Otherwise null.",
   "suggested_next": "approve|defer|someday"
-}}"""
+}}
+
+MIRROR PROTOCOL: Be direct and specific. Reference the user's actual history when available. Do not soften uncomfortable truths. If a pattern of failed similar proposals exists, name it."""
 
 
 def run_debate(
@@ -75,6 +77,9 @@ def run_debate(
     goals: list[dict],
     actual_season: str | None = None,
     revisit_context: dict | None = None,
+    constitution: str = "",
+    memory_context: str = "",
+    run_premortem: bool = True,
 ) -> dict:
     """
     Run a 3-voice boardroom debate on a proposal.
@@ -121,6 +126,13 @@ def run_debate(
             f"Previous consensus: {revisit_context.get('consensus', 'not recorded')}"
         )
 
+    premortem_section = ""
+    if run_premortem:
+        premortem_section = "\n\nPRE-MORTEM REQUIRED: Before voting, each voice must first state: 'If this fails in 6 months, the most likely reason is...' based on the user's history and patterns. Then vote.\n"
+
+    constitution_section = f"\nCONSTITUTION (user's values and non-negotiables):\n{constitution}\n" if constitution else ""
+    memory_section = f"\nMEMORY CONTEXT:\n{memory_context}\n" if memory_context else ""
+
     user_content = f"""PROPOSAL: "{redact(proposal)}"
 
 {season_text}
@@ -131,7 +143,7 @@ def run_debate(
 
 {goals_text}
 {revisit_text}
-
+{constitution_section}{memory_section}{premortem_section}
 Run the board meeting."""
 
     client = _client()
