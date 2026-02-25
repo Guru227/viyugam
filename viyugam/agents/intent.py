@@ -37,6 +37,7 @@ VALID ACTIONS:
   finance_insights  — AI finance analysis
   show_goals      — view long-term goals
   add_goal        — add a new goal
+  delete_goal     — permanently delete a goal
   show_decisions  — browse past boardroom decisions
   show_backlog    — browse backlog
   show_horizon    — 4-12 week forward view
@@ -60,6 +61,7 @@ ROUTING RULES (apply in order):
 7. "finance", "spending", "budget", "money", "transactions" → show_finance
 8. "goals", "show goals", "my goals" → show_goals
 9. "add goal", "new goal", "I want to" → add_goal (text = full original)
+9b. "delete goal X", "remove goal X", "get rid of goal X" → delete_goal (task_title_hint = X)
 10. "decisions", "past decisions" → show_decisions
 11. "backlog" → show_backlog
 12. "horizon", "next few weeks" → show_horizon

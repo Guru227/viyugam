@@ -259,6 +259,77 @@ def _done_by_hint(hint: str | None) -> None:
         cmd_done(argparse.Namespace(task_id=task.id))
 
 
+# ── Delete-goal-by-hint ────────────────────────────────────────────────────────
+
+def _delete_goal_by_hint(hint: str | None) -> None:
+    """Delete a goal by fuzzy-matching hint text against goal titles."""
+    goals = storage.get_goals(active_only=False)
+
+    if not goals:
+        console.print("[dim]No goals to delete.[/dim]")
+        return
+
+    if not hint:
+        # No hint — show numbered list and ask
+        console.print()
+        for i, g in enumerate(goals, 1):
+            dim = g.dimension.value if g.dimension else "—"
+            console.print(f"  [dim]{i}.[/dim]  {g.title}  [dim]{dim}[/dim]")
+        console.print()
+        try:
+            from prompt_toolkit.shortcuts import prompt as pt_prompt
+            raw = pt_prompt("Delete number (or Enter to cancel): ").strip()
+            if not raw or not raw.isdigit():
+                return
+            idx = int(raw) - 1
+            if not (0 <= idx < len(goals)):
+                console.print("[red]Out of range.[/red]")
+                return
+            goal = goals[idx]
+        except (KeyboardInterrupt, EOFError):
+            return
+    else:
+        hint_lower = hint.lower()
+        hint_words = set(hint_lower.split())
+
+        def _score(g) -> int:
+            t = g.title.lower()
+            if hint_lower in t:
+                return 100
+            return len(hint_words & set(t.split()))
+
+        scored = sorted([(g, _score(g)) for g in goals], key=lambda x: -x[1])
+        scored = [(g, s) for g, s in scored if s > 0]
+
+        if not scored:
+            console.print(f"[yellow]No goals matching \"{hint}\".[/yellow]")
+            return
+
+        if len(scored) == 1 or scored[0][1] >= 100 or (len(scored) > 1 and scored[0][1] > scored[1][1] * 2):
+            goal = scored[0][0]
+        else:
+            console.print(f"[dim]Multiple matches for \"{hint}\":[/dim]")
+            matches = [g for g, _ in scored[:5]]
+            for i, g in enumerate(matches, 1):
+                console.print(f"  [dim]{i}.[/dim]  {g.title}")
+            try:
+                from prompt_toolkit.shortcuts import prompt as pt_prompt
+                raw = pt_prompt("Delete number (or Enter to cancel): ").strip()
+                if not raw or not raw.isdigit():
+                    return
+                idx = int(raw) - 1
+                if not (0 <= idx < len(matches)):
+                    return
+                goal = matches[idx]
+            except (KeyboardInterrupt, EOFError):
+                return
+
+    if storage.delete_goal(goal.id):
+        console.print(f"[green]Deleted goal:[/green] {goal.title}")
+    else:
+        console.print(f"[red]Could not delete goal.[/red]")
+
+
 # ── AI Dispatcher ──────────────────────────────────────────────────────────────
 
 def _ai_dispatch(text: str) -> None:
@@ -342,6 +413,9 @@ def _ai_dispatch(text: str) -> None:
 
         elif action == "show_goals":
             cmd_goals(argparse.Namespace(add=False, title=[], dimension=None))
+
+        elif action == "delete_goal":
+            _delete_goal_by_hint(args.get("task_title_hint"))
 
         elif action == "add_goal":
             text_val = args.get("text") or text

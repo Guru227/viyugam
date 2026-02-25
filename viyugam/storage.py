@@ -214,6 +214,16 @@ def save_goal(goal: Goal) -> None:
     _save("goals", existing)
 
 
+def delete_goal(goal_id: str) -> bool:
+    """Remove a goal by id. Returns True if found and deleted."""
+    raw = _load("goals")
+    filtered = [g for g in raw if g["id"] != goal_id]
+    if len(filtered) == len(raw):
+        return False
+    _save("goals", filtered)
+    return True
+
+
 # ── Inbox ──────────────────────────────────────────────────────────────────────
 
 def get_inbox(unprocessed_only: bool = True) -> list[InboxItem]:
