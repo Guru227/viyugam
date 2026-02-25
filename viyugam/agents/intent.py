@@ -99,6 +99,11 @@ RULES:
 - For run_review: review_cadence should be "weekly", "monthly", or "quarterly" (default "weekly").
 - Never include more fields than the args schema above.
 - Keep preview concise (under 60 chars).
+- IMPORTANT: For long brain-dumps with many tasks/habits/goals mixed together,
+  return a SINGLE log_content action with the full text — do NOT enumerate each
+  item as a separate action. The chairman triage agent handles splitting internally.
+  Only split into multiple actions when the input contains clearly distinct ACTION
+  TYPES (e.g. "finished X" + "spent Y on Z" → mark_done + log_finance).
 """
 
 
@@ -112,7 +117,7 @@ def classify_intent(text: str, context_summary: str = "") -> list[dict]:
     client = _client()
     response = client.messages.create(
         model="claude-sonnet-4-6",
-        max_tokens=1024,
+        max_tokens=2048,
         system=INTENT_SYSTEM,
         messages=[{"role": "user", "content": redact(user_content)}],
     )
@@ -121,4 +126,14 @@ def classify_intent(text: str, context_summary: str = "") -> list[dict]:
     if raw.startswith("```"):
         raw = raw.split("\n", 1)[1].rsplit("```", 1)[0].strip()
 
-    return json.loads(raw)
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        # Truncated or malformed response — fall back to logging the full input
+        return [{
+            "action": "log_content",
+            "args": {"text": text, "proposal": None, "task_title_hint": None,
+                     "review_cadence": None, "query": None},
+            "preview": "Log to inbox (chairman will triage)",
+            "clarify": None,
+        }]
