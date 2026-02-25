@@ -834,19 +834,19 @@ def run_dashboard() -> None:
     # ── Key bindings ──
     kb = KeyBindings()
 
-    @kb.add("left")
+    @kb.add("left", eager=True)
     def _left(event):
         state.panel = max(0, state.panel - 1)
 
-    @kb.add("right")
+    @kb.add("right", eager=True)
     def _right(event):
         state.panel = min(len(PANELS) - 1, state.panel + 1)
 
-    @kb.add("up")
+    @kb.add("up", eager=True)
     def _up(event):
         state.scroll_l[state.panel] = max(0, state.scroll_l[state.panel] - 1)
 
-    @kb.add("down")
+    @kb.add("down", eager=True)
     def _down(event):
         mx = max(0, len(_panel_lines()) - 5)
         state.scroll_l[state.panel] = min(mx, state.scroll_l[state.panel] + 1)
@@ -928,6 +928,11 @@ def run_dashboard() -> None:
         t.start()
 
     # ── Layout ──
+    import shutil as _shutil
+    _cols    = _shutil.get_terminal_size().columns
+    _left_w  = max(40, int(_cols * 0.60))
+    _right_w = max(28, _cols - _left_w - 1)
+
     layout = Layout(
         HSplit([
             Window(
@@ -944,7 +949,7 @@ def run_dashboard() -> None:
                     ),
                     Window(height=1, char="─", style="class:sep"),
                     Window(content=panel_ctrl),
-                ], width=D(weight=60)),
+                ], width=_left_w),
                 Window(width=1, char="│", style="class:div"),
                 HSplit([
                     Window(
@@ -954,19 +959,19 @@ def run_dashboard() -> None:
                     ),
                     Window(height=1, char="─", style="class:sep"),
                     Window(content=chat_ctrl),
-                ], width=D(weight=40)),
+                    Window(height=1, char="─", style="class:sep"),
+                    Window(
+                        height=1,
+                        content=BufferControl(buffer=input_buffer),
+                        get_line_prefix=_prompt_prefix,
+                        style="class:input.line",
+                    ),
+                ], width=_right_w),
             ]),
-            Window(height=1, char="─", style="class:sep"),
             Window(
                 height=1,
                 content=FormattedTextControl(_toolbar_tokens),
                 style="class:toolbar",
-            ),
-            Window(
-                height=1,
-                content=BufferControl(buffer=input_buffer),
-                get_line_prefix=_prompt_prefix,
-                style="class:input.line",
             ),
         ])
     )
