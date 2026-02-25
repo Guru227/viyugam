@@ -111,6 +111,7 @@ def build_review_data(
     season: dict | None,
     actual_season: str | None,
     today: str,
+    finance_summary: str = "",
 ) -> str:
     """Format all review data into a readable context string for Claude."""
     days_map = {"weekly": 7, "monthly": 30, "quarterly": 90}
@@ -178,6 +179,12 @@ def build_review_data(
             score = ds.get("score", 0)
             bar = "█" * int(score) + "░" * (10 - int(score))
             lines.append(f"  {ds.get('dimension'):15} [{bar}] {score}")
+        lines.append("")
+
+    # Finance (monthly/quarterly only)
+    if finance_summary and cadence in ("monthly", "quarterly"):
+        lines.append("FINANCE:")
+        lines.append(finance_summary)
         lines.append("")
 
     # Journal patterns

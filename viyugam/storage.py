@@ -17,7 +17,7 @@ from viyugam.models import (
     JournalSummary, SystemState, ViyugamConfig,
     TaskStatus, ResilienceState, CalendarEntry,
     SlowBurn, Milestone, Budget, Transaction, Decision, ActualRecord,
-    OKR, KeyResult,
+    OKR, KeyResult, RecurringItem, TxType,
 )
 
 
@@ -39,6 +39,7 @@ MEMORY_FILE      = HOME / "memory.json"
 CONSTITUTION_FILE= HOME / "constitution.md"
 ENERGY_CACHE_FILE= DATA / "energy_pattern.json"
 OKRS_FILE        = DATA / "okrs.json"
+RECURRING_FILE   = DATA / "recurring.json"
 JOURNALS_DIR     = JOURNALS
 
 
@@ -55,7 +56,8 @@ def ensure_dirs() -> None:
     if not CALENDAR_FILE.exists():
         CALENDAR_FILE.write_text("[]")
     for fpath in (SLOW_BURNS_FILE, MILESTONES_FILE, BUDGETS_FILE,
-                  TRANSACTIONS_FILE, DECISIONS_FILE, ACTUALS_FILE, OKRS_FILE):
+                  TRANSACTIONS_FILE, DECISIONS_FILE, ACTUALS_FILE, OKRS_FILE,
+                  RECURRING_FILE):
         if not fpath.exists():
             fpath.write_text("[]")
 
@@ -593,6 +595,151 @@ def get_budget_summary() -> list[dict]:
             "dimension": b.dimension.value if b.dimension else None,
         })
     return result
+
+
+# ── Recurring items ───────────────────────────────────────────────────────────
+
+def get_recurring_items(active_only: bool = True) -> list[RecurringItem]:
+    raw = json.loads(RECURRING_FILE.read_text()) if RECURRING_FILE.exists() else []
+    items = [RecurringItem(**r) for r in raw]
+    if active_only:
+        items = [i for i in items if i.is_active]
+    return items
+
+
+def save_recurring_item(item: RecurringItem) -> None:
+    raw = json.loads(RECURRING_FILE.read_text()) if RECURRING_FILE.exists() else []
+    raw = [r for r in raw if r["id"] != item.id]
+    raw.append(item.model_dump())
+    RECURRING_FILE.write_text(json.dumps(raw, indent=2, ensure_ascii=False))
+
+
+def delete_recurring_item(item_id: str) -> None:
+    raw = json.loads(RECURRING_FILE.read_text()) if RECURRING_FILE.exists() else []
+    RECURRING_FILE.write_text(json.dumps(
+        [r for r in raw if r["id"] != item_id], indent=2, ensure_ascii=False
+    ))
+
+
+def get_transactions_by_period(start: str, end: str) -> list[Transaction]:
+    """Return transactions where occurred_at falls within [start, end] (YYYY-MM-DD)."""
+    all_txns = get_transactions()
+    return [t for t in all_txns if start <= t.occurred_at[:10] <= end]
+
+
+def get_spending_by_category(start: str, end: str) -> dict[str, float]:
+    """Return {category: total_amount} for EXPENSE transactions in the period."""
+    txns = [t for t in get_transactions_by_period(start, end)
+            if t.tx_type == TxType.EXPENSE]
+    result: dict[str, float] = {}
+    for t in txns:
+        result[t.category] = round(result.get(t.category, 0.0) + t.amount, 2)
+    return result
+
+
+def get_monthly_cashflow(month: str) -> dict:
+    """month='YYYY-MM' → {income, expenses, net, by_category, transactions}"""
+    start = f"{month}-01"
+    # Calculate end of month
+    year, mon = int(month[:4]), int(month[5:7])
+    import calendar as _cal
+    last_day = _cal.monthrange(year, mon)[1]
+    end = f"{month}-{last_day:02d}"
+
+    txns = get_transactions_by_period(start, end)
+    income = round(sum(t.amount for t in txns if t.tx_type == TxType.INCOME), 2)
+    expenses = round(sum(t.amount for t in txns if t.tx_type == TxType.EXPENSE), 2)
+    net = round(income - expenses, 2)
+    by_category: dict[str, float] = {}
+    for t in txns:
+        if t.tx_type == TxType.EXPENSE:
+            by_category[t.category] = round(by_category.get(t.category, 0.0) + t.amount, 2)
+    return {
+        "month": month,
+        "income": income,
+        "expenses": expenses,
+        "net": net,
+        "by_category": by_category,
+        "transactions": [t.model_dump() for t in txns],
+    }
+
+
+def get_due_recurring_items(as_of: str | None = None) -> list[RecurringItem]:
+    """Active items where day_of_month == today.day AND last_logged != this month."""
+    today_date = date.fromisoformat(as_of) if as_of else date.today()
+    this_month = today_date.strftime("%Y-%m")
+    items = get_recurring_items(active_only=True)
+    due = []
+    for item in items:
+        if item.day_of_month != today_date.day:
+            continue
+        # Check if already logged this month
+        if item.last_logged and item.last_logged[:7] == this_month:
+            continue
+        due.append(item)
+    return due
+
+
+def get_finance_context(months: int = 3) -> str:
+    """Comprehensive snapshot string for agents: budgets, cashflow, recurring, net."""
+    today = date.today()
+    lines = ["FINANCE CONTEXT:"]
+
+    # Active budgets
+    summaries = get_budget_summary()
+    if summaries:
+        lines.append(f"\nActive budgets ({len(summaries)}):")
+        for b in summaries:
+            lines.append(
+                f"  {b['name']}: {b['spent']:,.0f}/{b['total_limit']:,.0f} spent ({b['pct']}% used)"
+            )
+
+    # Monthly cashflow for last N months
+    cashflows = []
+    for i in range(months):
+        year = today.year
+        mon = today.month - i
+        while mon <= 0:
+            mon += 12
+            year -= 1
+        month_str = f"{year}-{mon:02d}"
+        cf = get_monthly_cashflow(month_str)
+        cashflows.append(cf)
+
+    if cashflows:
+        lines.append(f"\nMonthly cashflow (last {months} months):")
+        for cf in cashflows:
+            lines.append(
+                f"  {cf['month']}: income={cf['income']:,.0f}  "
+                f"expenses={cf['expenses']:,.0f}  net={cf['net']:+,.0f}"
+            )
+        # Top categories from most recent month
+        top_cats = sorted(
+            cashflows[0]["by_category"].items(), key=lambda x: -x[1]
+        )[:5]
+        if top_cats:
+            lines.append(f"\nTop expense categories ({cashflows[0]['month']}):")
+            for cat, amt in top_cats:
+                lines.append(f"  {cat}: {amt:,.0f}")
+
+    # Recurring items
+    all_recurring = get_recurring_items(active_only=True)
+    if all_recurring:
+        total_monthly_expense = sum(
+            r.amount for r in all_recurring
+            if r.tx_type == TxType.EXPENSE and r.frequency.value == "monthly"
+        )
+        total_monthly_income = sum(
+            r.amount for r in all_recurring
+            if r.tx_type == TxType.INCOME and r.frequency.value == "monthly"
+        )
+        lines.append(
+            f"\nRecurring items ({len(all_recurring)} active): "
+            f"monthly expenses={total_monthly_expense:,.0f}  "
+            f"monthly income={total_monthly_income:,.0f}"
+        )
+
+    return "\n".join(lines)
 
 # ── Decisions ─────────────────────────────────────────────────────────────────
 

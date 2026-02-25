@@ -82,6 +82,7 @@ _COMPLETIONS = [
     "/backlog",
     "/milestones", "/milestones --add", "/milestones --done ",
     "/finance", "/finance budget", "/finance log", "/finance summary",
+    "/finance history", "/finance recurring", "/finance insights",
     "/constitution",
     "/think", "/think ",
     "/review", "/review --weekly", "/review --monthly", "/review --quarterly",
@@ -268,7 +269,9 @@ def _dispatch(line: str) -> None:
         cmd_backlog(argparse.Namespace())
 
     elif cmd == "finance":
-        sub = rest[0] if rest and rest[0] in ("budget", "log", "summary") else "summary"
+        sub = rest[0] if rest and rest[0] in (
+            "budget", "log", "summary", "history", "recurring", "insights"
+        ) else "summary"
         cmd_finance(argparse.Namespace(sub=sub))
 
     elif cmd == "constitution":

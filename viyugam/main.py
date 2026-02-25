@@ -35,7 +35,7 @@ from viyugam.models import (
     Task, Project, TaskStatus, ResilienceState, SystemState,
     CalendarEntry, CalendarEntryType,
     SlowBurn, Milestone, Budget, Transaction, Decision, ActualRecord,
-    OKR, KeyResult,
+    OKR, KeyResult, TxType, RecurringItem,
 )
 
 console = Console()
@@ -246,6 +246,13 @@ def cmd_plan(args: argparse.Namespace) -> None:
     goals = storage.get_goals()
     recent_journals = storage.get_recent_journals(days=14)
     nudges = storage.get_nudges(state)
+
+    # Recurring finance nudges
+    for item in storage.get_due_recurring_items():
+        nudges.append(
+            f"Recurring {item.tx_type.value} due: {item.name} "
+            f"({config.currency}{item.amount:,.0f})"
+        )
 
     if not all_tasks and not habits:
         console.print(
@@ -1018,13 +1025,26 @@ def _log_entry(text: str, config=None, state=None) -> None:
         console.print(f"[green]Event:[/green] {entry.title} [dim](id: {entry.id})[/dim]")
 
     elif rtype == "transaction":
+        raw_tx_type = result.get("tx_type", "expense") or "expense"
+        try:
+            tx_type = TxType(raw_tx_type.lower())
+        except ValueError:
+            tx_type = TxType.EXPENSE
         txn = Transaction(
             amount=float(result.get("amount", 0)),
             category=result.get("category", "general"),
             description=result.get("description", title),
+            tx_type=tx_type,
         )
+        # Auto-link to budget: if single active budget exists and it's an expense, link it
+        if tx_type == TxType.EXPENSE and not txn.budget_id:
+            active_budgets = [b for b in storage.get_budgets()
+                              if b.period_end >= date.today().isoformat()]
+            if len(active_budgets) == 1:
+                txn.budget_id = active_budgets[0].id
         storage.save_transaction(txn)
-        console.print(f"[green]Transaction:[/green] {txn.description} [dim]{config.currency}{txn.amount}[/dim]")
+        type_label = "Income" if tx_type == TxType.INCOME else "Transaction"
+        console.print(f"[green]{type_label}:[/green] {txn.description} [dim]{config.currency}{txn.amount}[/dim]")
 
     elif rtype == "journal":
         # Just keep in inbox as processed, save to today's journal append
@@ -1476,17 +1496,26 @@ def cmd_finance(args: argparse.Namespace) -> None:
         _finance_budget(args)
     elif sub == "log":
         _finance_log(args)
-    elif sub == "summary":
-        _finance_summary(config)
+    elif sub == "history":
+        _finance_history(config)
+    elif sub == "recurring":
+        _finance_recurring(config)
+    elif sub == "insights":
+        _finance_insights(config)
     else:
         _finance_summary(config)
 
 
 def _finance_summary(config) -> None:
-    summaries = storage.get_budget_summary()
-    recent_txns = storage.get_transactions()[-10:]
+    from datetime import date as _date
+    today = _date.today()
+    this_month = today.strftime("%Y-%m")
+    currency = config.currency
 
     console.print()
+
+    # 1. Active budgets table
+    summaries = storage.get_budget_summary()
     if summaries:
         tbl = Table(box=box.SIMPLE, show_header=True, header_style="bold dim", padding=(0,1))
         tbl.add_column("Budget", min_width=18)
@@ -1495,7 +1524,6 @@ def _finance_summary(config) -> None:
         tbl.add_column("Left", justify="right", style="green")
         tbl.add_column("%", justify="right", style="dim")
         for b in summaries:
-            currency = config.currency
             color = "red" if b["pct"] > 90 else "yellow" if b["pct"] > 70 else "green"
             tbl.add_row(
                 b["name"],
@@ -1508,10 +1536,62 @@ def _finance_summary(config) -> None:
     else:
         console.print("[dim]No budgets set up. Run: viyugam finance budget[/dim]")
 
-    if recent_txns:
-        console.print("\n[bold dim]Recent transactions:[/bold dim]")
-        for t in recent_txns[-5:]:
-            console.print(f"  [dim]{t.occurred_at[:10]}[/dim]  {t.description}  [cyan]{config.currency}{t.amount:,.0f}[/cyan]")
+    # 2. This month cashflow
+    cf = storage.get_monthly_cashflow(this_month)
+    net_color = "green" if cf["net"] >= 0 else "red"
+    income_str = f"[green]{currency}{cf['income']:,.0f}[/green]"
+    expense_str = f"[red]{currency}{cf['expenses']:,.0f}[/red]" if cf["expenses"] > 0 else f"{currency}0"
+    net_str = f"[{net_color}]{currency}{cf['net']:+,.0f}[/{net_color}]"
+    console.print(
+        f"\n  [bold]{this_month} cashflow[/bold]  "
+        f"in {income_str}  out {expense_str}  net {net_str}"
+    )
+
+    # 3. Top 5 categories
+    if cf["by_category"]:
+        top_cats = sorted(cf["by_category"].items(), key=lambda x: -x[1])[:5]
+        console.print("  [dim]Top expenses:[/dim]")
+        for cat, amt in top_cats:
+            console.print(f"    [dim]{cat}:[/dim]  {currency}{amt:,.0f}")
+
+    # 4. Recurring items due today
+    due_items = storage.get_due_recurring_items()
+    if due_items:
+        console.print()
+        for item in due_items:
+            icon = "[green]↑[/green]" if item.tx_type == TxType.INCOME else "[red]↓[/red]"
+            console.print(
+                f"  {icon} Recurring due today: [bold]{item.name}[/bold] "
+                f"[dim]{currency}{item.amount:,.0f}[/dim]"
+            )
+
+    # 5. AI headline
+    try:
+        from viyugam.agents.finance import analyze_finance
+        prev_months = []
+        for i in range(1, 3):
+            year = today.year
+            mon = today.month - i
+            while mon <= 0:
+                mon += 12
+                year -= 1
+            prev_months.append(storage.get_monthly_cashflow(f"{year}-{mon:02d}"))
+
+        with console.status("[dim]Analysing finances...[/dim]"):
+            analysis = analyze_finance(
+                budget_summaries=summaries,
+                monthly_cashflow=[cf] + prev_months,
+                recurring_items=[r.model_dump() for r in storage.get_recurring_items()],
+            )
+        score = analysis.get("wealth_score", "?")
+        score_color = "green" if score >= 7 else "yellow" if score >= 4 else "red"
+        console.print(
+            f"\n  [bold]{analysis.get('headline', '')}[/bold]  "
+            f"[dim]wealth score: [{score_color}]{score}/10[/{score_color}][/dim]"
+        )
+    except Exception:
+        pass
+
     console.print()
 
 
@@ -1534,26 +1614,257 @@ def _finance_budget(args) -> None:
 
 
 def _finance_log(args) -> None:
+    config = storage.load_config()
     desc    = Prompt.ask("Description")
     amount  = Prompt.ask("Amount")
-    cat     = Prompt.ask("Category", default="general")
-    budgets = storage.get_budgets()
-    budget_id = None
-    if budgets:
-        console.print("\n[dim]Budgets:[/dim]")
-        for i, b in enumerate(budgets, 1):
-            console.print(f"  {i}. {b.name} [dim](left: {b.total_limit - b.spent:,.0f})[/dim]")
-        raw = Prompt.ask("Link to budget? (number or Enter to skip)", default="")
-        if raw.strip().isdigit():
-            idx = int(raw.strip()) - 1
-            if 0 <= idx < len(budgets):
-                budget_id = budgets[idx].id
+    tx_type_raw = Prompt.ask("Type", choices=["expense", "income", "transfer"], default="expense")
     try:
-        t = Transaction(amount=float(amount), category=cat, description=desc, budget_id=budget_id)
+        tx_type = TxType(tx_type_raw)
+    except ValueError:
+        tx_type = TxType.EXPENSE
+    cat = Prompt.ask("Category", default="general")
+
+    budget_id = None
+    if tx_type == TxType.EXPENSE:
+        budgets = storage.get_budgets()
+        if budgets:
+            # Auto-link if single active budget
+            active = [b for b in budgets if b.period_end >= date.today().isoformat()]
+            if len(active) == 1:
+                budget_id = active[0].id
+                console.print(f"[dim]Auto-linked to budget: {active[0].name}[/dim]")
+            elif active:
+                console.print("\n[dim]Budgets:[/dim]")
+                for i, b in enumerate(active, 1):
+                    console.print(f"  {i}. {b.name} [dim](left: {config.currency}{b.total_limit - b.spent:,.0f})[/dim]")
+                raw = Prompt.ask("Link to budget? (number or Enter to skip)", default="")
+                if raw.strip().isdigit():
+                    idx = int(raw.strip()) - 1
+                    if 0 <= idx < len(active):
+                        budget_id = active[idx].id
+    try:
+        t = Transaction(
+            amount=float(amount), category=cat, description=desc,
+            tx_type=tx_type, budget_id=budget_id,
+        )
         storage.save_transaction(t)
-        console.print(f"[green]Transaction logged:[/green] {t.description}")
+        icon = "[green]↑[/green]" if tx_type == TxType.INCOME else "[red]↓[/red]"
+        console.print(f"{icon} [green]Logged:[/green] {t.description}  [dim]{config.currency}{t.amount:,.0f}[/dim]")
     except Exception as e:
         console.print(f"[red]Error:[/red] {e}")
+
+
+def _finance_history(config) -> None:
+    """Browse transactions month-by-month with n/p navigation."""
+    from datetime import date as _date
+    currency = config.currency
+    today = _date.today()
+    year, mon = today.year, today.month
+
+    while True:
+        month_str = f"{year}-{mon:02d}"
+        cf = storage.get_monthly_cashflow(month_str)
+        txns = [Transaction(**t) for t in cf["transactions"]]
+        txns.sort(key=lambda t: t.occurred_at, reverse=True)
+
+        net_color = "green" if cf["net"] >= 0 else "red"
+        header = (
+            f"[bold]{month_str}[/bold]  "
+            f"in [green]{currency}{cf['income']:,.0f}[/green]  "
+            f"out [red]{currency}{cf['expenses']:,.0f}[/red]  "
+            f"net [{net_color}]{currency}{cf['net']:+,.0f}[/{net_color}]"
+        )
+
+        tbl = Table(box=box.SIMPLE, show_header=True, header_style="bold dim", padding=(0, 1))
+        tbl.add_column("Date", style="dim", width=10)
+        tbl.add_column("Type", width=8)
+        tbl.add_column("Description", min_width=24)
+        tbl.add_column("Category", style="dim")
+        tbl.add_column("Amount", justify="right")
+
+        for t in txns:
+            if t.tx_type == TxType.INCOME:
+                type_str = "[green]income[/green]"
+                amt_str = f"[green]+{currency}{t.amount:,.0f}[/green]"
+            elif t.tx_type == TxType.TRANSFER:
+                type_str = "[blue]transfer[/blue]"
+                amt_str = f"[blue]{currency}{t.amount:,.0f}[/blue]"
+            else:
+                type_str = "[red]expense[/red]"
+                amt_str = f"[red]-{currency}{t.amount:,.0f}[/red]"
+            tbl.add_row(t.occurred_at[:10], type_str, t.description, t.category, amt_str)
+
+        console.print()
+        if txns:
+            console.print(Panel(tbl, title=header, border_style="dim", padding=(0, 1)))
+        else:
+            console.print(Panel(f"{header}\n\n[dim]No transactions.[/dim]", border_style="dim", padding=(0, 1)))
+
+        nav = Prompt.ask(
+            "  [dim]n[/dim] next month  [dim]p[/dim] previous  [dim]q[/dim] quit",
+            choices=["n", "p", "q"],
+            default="q",
+        )
+        if nav == "q":
+            break
+        elif nav == "n":
+            mon += 1
+            if mon > 12:
+                mon = 1
+                year += 1
+        else:
+            mon -= 1
+            if mon < 1:
+                mon = 12
+                year -= 1
+
+
+def _finance_recurring(config) -> None:
+    """List, add, and toggle recurring items."""
+    currency = config.currency
+
+    while True:
+        items = storage.get_recurring_items(active_only=False)
+        console.print()
+        if items:
+            tbl = Table(box=box.SIMPLE, show_header=True, header_style="bold dim", padding=(0, 1))
+            tbl.add_column("#", style="dim", width=3)
+            tbl.add_column("Name", min_width=20)
+            tbl.add_column("Type", width=8)
+            tbl.add_column("Amount", justify="right")
+            tbl.add_column("Freq", style="dim")
+            tbl.add_column("Day", justify="right", style="dim")
+            tbl.add_column("Active", justify="center", style="dim")
+            for i, item in enumerate(items, 1):
+                type_color = "green" if item.tx_type == TxType.INCOME else "red"
+                active_str = "[green]Y[/green]" if item.is_active else "[dim]N[/dim]"
+                tbl.add_row(
+                    str(i),
+                    item.name,
+                    f"[{type_color}]{item.tx_type.value}[/{type_color}]",
+                    f"{currency}{item.amount:,.0f}",
+                    item.frequency.value,
+                    str(item.day_of_month),
+                    active_str,
+                )
+            console.print(Panel(tbl, title="[bold]Recurring Items[/bold]", border_style="dim", padding=(0, 1)))
+        else:
+            console.print("[dim]No recurring items yet.[/dim]")
+
+        action = Prompt.ask(
+            "  [dim]a[/dim] add  [dim]t[/dim] toggle  [dim]q[/dim] quit",
+            choices=["a", "t", "q"],
+            default="q",
+        )
+
+        if action == "q":
+            break
+
+        elif action == "a":
+            from viyugam.models import RecurringFrequency
+            name = Prompt.ask("Name (e.g. Salary, EMI, Netflix)")
+            amount = Prompt.ask("Amount")
+            tx_type_raw = Prompt.ask("Type", choices=["expense", "income", "transfer"], default="expense")
+            cat = Prompt.ask("Category", default="general")
+            freq_raw = Prompt.ask(
+                "Frequency", choices=["daily", "weekly", "monthly", "yearly"], default="monthly"
+            )
+            day = Prompt.ask("Day of month (1-28)", default="1")
+            try:
+                from viyugam.models import RecurringFrequency
+                item = RecurringItem(
+                    name=name,
+                    amount=float(amount),
+                    tx_type=TxType(tx_type_raw),
+                    category=cat,
+                    frequency=RecurringFrequency(freq_raw),
+                    day_of_month=int(day),
+                )
+                storage.save_recurring_item(item)
+                console.print(f"[green]Added:[/green] {item.name}")
+            except Exception as e:
+                console.print(f"[red]Error:[/red] {e}")
+
+        elif action == "t":
+            if not items:
+                console.print("[dim]Nothing to toggle.[/dim]")
+                continue
+            raw = Prompt.ask("Toggle item number")
+            if raw.strip().isdigit():
+                idx = int(raw.strip()) - 1
+                if 0 <= idx < len(items):
+                    item = items[idx]
+                    item.is_active = not item.is_active
+                    storage.save_recurring_item(item)
+                    status = "active" if item.is_active else "inactive"
+                    console.print(f"[green]{item.name}[/green] → {status}")
+
+
+def _finance_insights(config) -> None:
+    """Full AI finance analysis panel."""
+    from datetime import date as _date
+    from viyugam.agents.finance import analyze_finance
+    currency = config.currency
+    today = _date.today()
+
+    # Gather 3 months of cashflow
+    cashflows = []
+    for i in range(3):
+        year = today.year
+        mon = today.month - i
+        while mon <= 0:
+            mon += 12
+            year -= 1
+        cashflows.append(storage.get_monthly_cashflow(f"{year}-{mon:02d}"))
+
+    budget_summaries = storage.get_budget_summary()
+    recurring_items = [r.model_dump() for r in storage.get_recurring_items()]
+    constitution = storage.load_constitution()
+
+    console.print()
+    with console.status("[dim]Running finance analysis...[/dim]"):
+        try:
+            result = analyze_finance(
+                budget_summaries=budget_summaries,
+                monthly_cashflow=cashflows,
+                recurring_items=recurring_items,
+                constitution=constitution,
+            )
+        except Exception as e:
+            console.print(f"[red]Analysis failed:[/red] {e}")
+            return
+
+    score = result.get("wealth_score", 0)
+    score_color = "green" if score >= 7 else "yellow" if score >= 4 else "red"
+    bar = "█" * score + "░" * (10 - score)
+
+    savings = result.get("savings_rate")
+    savings_str = f"  [dim]savings rate: {savings:.1f}%[/dim]" if savings is not None else ""
+
+    panel_content = (
+        f"[bold]Wealth Score: [{score_color}]{score}/10[/{score_color}][/bold]  "
+        f"[{score_color}]{bar}[/{score_color}]{savings_str}\n\n"
+        f"[bold]{result.get('headline', '')}[/bold]\n\n"
+        f"{result.get('monthly_summary', '')}"
+    )
+
+    if result.get("insights"):
+        panel_content += "\n\n[bold]Insights[/bold]"
+        for ins in result["insights"]:
+            panel_content += f"\n  • {ins}"
+
+    if result.get("flags"):
+        panel_content += "\n\n[bold red]Flags[/bold red]"
+        for flag in result["flags"]:
+            panel_content += f"\n  [red]![/red] {flag}"
+
+    if result.get("recommendations"):
+        panel_content += "\n\n[bold]Recommendations[/bold]"
+        for rec in result["recommendations"]:
+            panel_content += f"\n  → {rec}"
+
+    console.print(Panel(panel_content, title="[bold cyan]Finance Insights[/bold cyan]", border_style="cyan", padding=(1, 2)))
+    console.print()
 
 
 # ── constitution ───────────────────────────────────────────────────────────────
@@ -1650,6 +1961,10 @@ def _run_think(
         padding=(1, 2),
     ))
 
+    finance_context = storage.get_finance_context(months=2)
+    memory_context = storage.get_memory_context()
+    constitution = storage.load_constitution()
+
     with console.status("[dim]The board is deliberating...[/dim]"):
         try:
             result = run_debate(
@@ -1661,6 +1976,9 @@ def _run_think(
                 actual_season=actual_season,
                 revisit_context=revisit_context,
                 run_premortem=True,
+                finance_context=finance_context,
+                memory_context=memory_context,
+                constitution=constitution,
             )
         except Exception as e:
             console.print(f"[red]Boardroom error:[/red] {e}")
@@ -1886,6 +2204,12 @@ def cmd_review(args: argparse.Namespace) -> None:
     season = config.season.model_dump() if config.season else None
     actual_season = storage.calculate_actual_season()
 
+    # Finance context for monthly/quarterly
+    finance_summary = ""
+    if cadence in ("monthly", "quarterly"):
+        months = 1 if cadence == "monthly" else 3
+        finance_summary = storage.get_finance_context(months=months)
+
     review_data = build_review_data(
         cadence=cadence,
         tasks_done=tasks_done,
@@ -1899,12 +2223,24 @@ def cmd_review(args: argparse.Namespace) -> None:
         season=season,
         actual_season=actual_season,
         today=today,
+        finance_summary=finance_summary,
     )
 
     # Generate opening briefing
+    constitution = storage.load_constitution()
+    memory_context = storage.get_memory_context()
+    coherence = storage.compute_coherence_score(config)
+    decisions_for_review = storage.get_decisions_for_review(days=days)
+
     with console.status("[dim]Preparing your review...[/dim]"):
         try:
-            briefing = generate_briefing(review_data, cadence)
+            briefing = generate_briefing(
+                review_data, cadence,
+                constitution=constitution,
+                memory_context=memory_context,
+                coherence=coherence,
+                decisions_for_review=decisions_for_review,
+            )
         except Exception as e:
             console.print(f"[red]Error generating briefing:[/red] {e}")
             return
@@ -2657,6 +2993,9 @@ def main() -> None:
     p_finance_sub.add_parser("budget", help="Create a budget")
     p_finance_sub.add_parser("log", help="Log a transaction")
     p_finance_sub.add_parser("summary", help="Show summary")
+    p_finance_sub.add_parser("history", help="Browse transactions month-by-month")
+    p_finance_sub.add_parser("recurring", help="Manage recurring items (EMIs, salary)")
+    p_finance_sub.add_parser("insights", help="Full AI finance analysis")
 
     # constitution
     p_constitution = sub.add_parser("constitution", help="View and edit your values document")

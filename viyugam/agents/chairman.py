@@ -34,7 +34,7 @@ Rules:
 - Dimensions: health, wealth, career, relationships, joy, learning.
 - context "ai-assisted" = uses Claude (research, planning, writing). Scheduleable anywhere with a laptop, including at office.
 - Be honest, not sycophantic. If something looks like avoidance (e.g. vague tasks, tasks deferred repeatedly), flag it in the notes field.
-- Additional output types beyond the array: if the input is clearly a JOURNAL ENTRY (reflection, feeling, event narrative), return type "journal". If it's a SLOW BURN ("learn Portuguese", "get fit eventually"), return type "slow_burn". If it's a GOAL ("I want to achieve X"), return type "goal". If it's a REVIEW FLAG ("I should reconsider my season"), return type "review_flag". If it's a HABIT ("do X every day"), return type "habit". If it's a TRANSACTION ("spent 500 on..."), return type "transaction" with fields: amount (float), category (str), description (str).
+- Additional output types beyond the array: if the input is clearly a JOURNAL ENTRY (reflection, feeling, event narrative), return type "journal". If it's a SLOW BURN ("learn Portuguese", "get fit eventually"), return type "slow_burn". If it's a GOAL ("I want to achieve X"), return type "goal". If it's a REVIEW FLAG ("I should reconsider my season"), return type "review_flag". If it's a HABIT ("do X every day"), return type "habit". If it's a TRANSACTION ("spent 500 on..." or "received salary..."), return type "transaction" with fields: amount (float), category (str), description (str), tx_type ("expense"|"income"|"transfer" — income for salary/payment received, expense for purchases/bills, transfer for moving money).
 
 Return ONLY a JSON array, no other text:
 [
@@ -49,7 +49,8 @@ Return ONLY a JSON array, no other text:
     "notes": "any extra context worth keeping",
     "amount": null,
     "category": null,
-    "description": null
+    "description": null,
+    "tx_type": null
   }
 ]"""
 

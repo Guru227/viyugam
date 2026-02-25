@@ -29,6 +29,7 @@ VISION — asks: Does this align with what we're building right now?
 
 RESOURCE — asks: Can we actually afford this?
   Considers: time budget, energy levels (from recent journals), financial cost
+  Cites actual budget numbers and cashflow when finance data is available.
   Tone: grounded, pragmatic, risk-aware but not fearful
 
 RISK — asks: What could go wrong? What are we giving up?
@@ -80,6 +81,7 @@ def run_debate(
     constitution: str = "",
     memory_context: str = "",
     run_premortem: bool = True,
+    finance_context: str = "",
 ) -> dict:
     """
     Run a 3-voice boardroom debate on a proposal.
@@ -132,6 +134,7 @@ def run_debate(
 
     constitution_section = f"\nCONSTITUTION (user's values and non-negotiables):\n{constitution}\n" if constitution else ""
     memory_section = f"\nMEMORY CONTEXT:\n{memory_context}\n" if memory_context else ""
+    finance_section = f"\n{finance_context}\n" if finance_context else ""
 
     user_content = f"""PROPOSAL: "{redact(proposal)}"
 
@@ -143,7 +146,7 @@ def run_debate(
 
 {goals_text}
 {revisit_text}
-{constitution_section}{memory_section}{premortem_section}
+{constitution_section}{memory_section}{finance_section}{premortem_section}
 Run the board meeting."""
 
     client = _client()

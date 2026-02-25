@@ -155,15 +155,44 @@ class Budget(BaseModel):
     dimension:    Optional[Dimension] = None
     created_at:   str      = Field(default_factory=lambda: datetime.now().isoformat())
 
+class TxType(str, Enum):
+    EXPENSE  = "expense"
+    INCOME   = "income"
+    TRANSFER = "transfer"
+
+
 class Transaction(BaseModel):
     id:          str      = Field(default_factory=new_id)
     amount:      float
     category:    str
     description: str
+    tx_type:     TxType   = TxType.EXPENSE
     budget_id:   Optional[str] = None
     task_id:     Optional[str] = None
     project_id:  Optional[str] = None
     occurred_at: str      = Field(default_factory=lambda: datetime.now().isoformat())
+
+
+class RecurringFrequency(str, Enum):
+    DAILY   = "daily"
+    WEEKLY  = "weekly"
+    MONTHLY = "monthly"
+    YEARLY  = "yearly"
+
+
+class RecurringItem(BaseModel):
+    id:           str       = Field(default_factory=new_id)
+    name:         str
+    amount:       float
+    tx_type:      TxType    = TxType.EXPENSE
+    category:     str       = "general"
+    frequency:    RecurringFrequency = RecurringFrequency.MONTHLY
+    day_of_month: int       = 1
+    budget_id:    Optional[str] = None
+    is_active:    bool      = True
+    last_logged:  Optional[str] = None   # YYYY-MM-DD
+    notes:        Optional[str] = None
+    created_at:   str       = Field(default_factory=lambda: datetime.now().isoformat())
 
 class Decision(BaseModel):
     id:             str            = Field(default_factory=new_id)
