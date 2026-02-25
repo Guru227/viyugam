@@ -618,18 +618,22 @@ def _run_command_bg(
     chat_width: int,
 ) -> None:
     """Run _ai_dispatch in background, capture output into chat pane."""
+    import viyugam.repl as _repl_mod
     from viyugam.repl import _ai_dispatch
 
     state.running = True
     state.chat.append({"role": "system", "text": "thinking…"})
     app.invalidate()
 
+    _repl_mod._tl.dashboard = True
     try:
         with _capture_rich(width=chat_width) as buf:
             _ai_dispatch(text)
         output = buf.getvalue()
     except Exception as e:
         output = f"[red]Error:[/red] {e}"
+    finally:
+        _repl_mod._tl.dashboard = False
 
     # Remove the "thinking…" placeholder
     if state.chat and state.chat[-1].get("text") == "thinking…":

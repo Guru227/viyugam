@@ -7,6 +7,7 @@ from __future__ import annotations
 import argparse
 import os
 import shutil
+import threading
 from datetime import date, datetime
 
 from prompt_toolkit import PromptSession
@@ -18,6 +19,14 @@ from rich.console import Console
 import viyugam.storage as storage
 
 console = Console()
+
+# Thread-local flag: set True in background threads running inside the dashboard.
+# Any code that would call pt_prompt() interactively must check this first.
+_tl = threading.local()
+
+
+def _in_dashboard() -> bool:
+    return getattr(_tl, "dashboard", False)
 
 
 # ── Context summary ────────────────────────────────────────────────────────────
@@ -240,10 +249,11 @@ def _done_by_hint(hint: str | None) -> None:
     scored.sort(key=lambda x: x[1], reverse=True)
 
     if not scored:
-        console.print(f"[yellow]No tasks matching \"{hint}\" found.[/yellow] Showing picker.")
-        task = _pick_task()
-        if task:
-            cmd_done(argparse.Namespace(task_id=task.id))
+        console.print(f"[yellow]No tasks matching \"{hint}\" found.[/yellow]")
+        if not _in_dashboard():
+            task = _pick_task()
+            if task:
+                cmd_done(argparse.Namespace(task_id=task.id))
         return
 
     best_task, best_score = scored[0]
@@ -252,7 +262,12 @@ def _done_by_hint(hint: str | None) -> None:
         cmd_done(argparse.Namespace(task_id=best_task.id))
         return
 
-    # Multiple plausible matches — show picker filtered to top candidates
+    # Multiple plausible matches
+    if _in_dashboard():
+        console.print(f"[yellow]Multiple tasks match \"{hint}\" — be more specific:[/yellow]")
+        for t, _ in scored[:5]:
+            console.print(f"  · {t.title}")
+        return
     console.print(f"[dim]Multiple matches for \"{hint}\".[/dim]")
     task = _pick_task()
     if task:
@@ -270,12 +285,15 @@ def _delete_goal_by_hint(hint: str | None) -> None:
         return
 
     if not hint:
-        # No hint — show numbered list and ask
+        # No hint — list goals
         console.print()
         for i, g in enumerate(goals, 1):
             dim = g.dimension.value if g.dimension else "—"
             console.print(f"  [dim]{i}.[/dim]  {g.title}  [dim]{dim}[/dim]")
         console.print()
+        if _in_dashboard():
+            console.print("[dim]Be more specific, e.g. \"delete goal Run a 10k\"[/dim]")
+            return
         try:
             from prompt_toolkit.shortcuts import prompt as pt_prompt
             raw = pt_prompt("Delete number (or Enter to cancel): ").strip()
@@ -308,8 +326,13 @@ def _delete_goal_by_hint(hint: str | None) -> None:
         if len(scored) == 1 or scored[0][1] >= 100 or (len(scored) > 1 and scored[0][1] > scored[1][1] * 2):
             goal = scored[0][0]
         else:
-            console.print(f"[dim]Multiple matches for \"{hint}\":[/dim]")
             matches = [g for g, _ in scored[:5]]
+            if _in_dashboard():
+                console.print(f"[yellow]Multiple goals match \"{hint}\" — be more specific:[/yellow]")
+                for g in matches:
+                    console.print(f"  · {g.title}")
+                return
+            console.print(f"[dim]Multiple matches for \"{hint}\":[/dim]")
             for i, g in enumerate(matches, 1):
                 console.print(f"  [dim]{i}.[/dim]  {g.title}")
             try:
