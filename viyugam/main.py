@@ -964,104 +964,104 @@ def _log_entry(text: str, config=None, state=None) -> None:
         console.print("[green]Captured to inbox.[/green]")
         return
 
-    result = results[0]
-    rtype = result.get("type", "task")
-    title = result.get("title", text[:80])
-
     storage.mark_inbox_processed([item.id])
 
-    if rtype == "task":
-        task = Task(
-            title=title,
-            dimension=result.get("dimension"),
-            energy_cost=result.get("energy_cost", 5),
-            estimated_minutes=result.get("estimated_minutes", 30),
-            context=result.get("context"),
-            notes=result.get("notes"),
-            scheduled_date=date.today().isoformat(),
-        )
-        storage.save_task(task)
-        dim = task.dimension.value if task.dimension else "—"
-        console.print(f"[green]Task:[/green] {task.title} [dim]· {dim} · {task.estimated_minutes}m (id: {task.id})[/dim]")
+    for result in results:
+        rtype = result.get("type", "task")
+        title = result.get("title", text[:80])
 
-    elif rtype == "habit":
-        from viyugam.models import Recurrence
-        task = Task(
-            title=title,
-            is_habit=True,
-            recurrence=Recurrence.DAILY,
-            dimension=result.get("dimension"),
-            energy_cost=result.get("energy_cost", 3),
-            estimated_minutes=result.get("estimated_minutes", 20),
-            notes=result.get("notes"),
-        )
-        storage.save_task(task)
-        console.print(f"[green]Habit:[/green] {task.title} [dim](id: {task.id})[/dim]")
+        if rtype == "task":
+            task = Task(
+                title=title,
+                dimension=result.get("dimension"),
+                energy_cost=result.get("energy_cost", 5),
+                estimated_minutes=result.get("estimated_minutes", 30),
+                context=result.get("context"),
+                notes=result.get("notes"),
+                scheduled_date=date.today().isoformat(),
+            )
+            storage.save_task(task)
+            dim = task.dimension.value if task.dimension else "—"
+            console.print(f"[green]Task:[/green] {task.title} [dim]· {dim} · {task.estimated_minutes}m (id: {task.id})[/dim]")
 
-    elif rtype == "goal":
-        from viyugam.models import Goal, Dimension as _Dim
-        dim_str = result.get("dimension", "career")
-        try:
-            dimension = _Dim(dim_str) if dim_str else None
-        except ValueError:
-            dimension = None
-        goal = Goal(title=title, dimension=dimension or _Dim.CAREER)
-        storage.save_goal(goal)
-        console.print(f"[green]Goal:[/green] {goal.title} [dim](id: {goal.id})[/dim]")
+        elif rtype == "habit":
+            from viyugam.models import Recurrence
+            task = Task(
+                title=title,
+                is_habit=True,
+                recurrence=Recurrence.DAILY,
+                dimension=result.get("dimension"),
+                energy_cost=result.get("energy_cost", 3),
+                estimated_minutes=result.get("estimated_minutes", 20),
+                notes=result.get("notes"),
+            )
+            storage.save_task(task)
+            console.print(f"[green]Habit:[/green] {task.title} [dim](id: {task.id})[/dim]")
 
-    elif rtype == "slow_burn":
-        sb = SlowBurn(title=title, notes=result.get("notes"), dimension=result.get("dimension"))
-        storage.save_slow_burn(sb)
-        console.print(f"[green]Slow burn:[/green] {sb.title} [dim](id: {sb.id})[/dim]")
+        elif rtype == "goal":
+            from viyugam.models import Goal, Dimension as _Dim
+            dim_str = result.get("dimension", "career")
+            try:
+                dimension = _Dim(dim_str) if dim_str else None
+            except ValueError:
+                dimension = None
+            goal = Goal(title=title, dimension=dimension or _Dim.CAREER)
+            storage.save_goal(goal)
+            console.print(f"[green]Goal:[/green] {goal.title} [dim](id: {goal.id})[/dim]")
 
-    elif rtype == "event":
-        entry = CalendarEntry(
-            title=title,
-            entry_type=CalendarEntryType.EVENT,
-            date=date.today().isoformat(),
-            notes=result.get("notes"),
-        )
-        storage.save_calendar_entry(entry)
-        console.print(f"[green]Event:[/green] {entry.title} [dim](id: {entry.id})[/dim]")
+        elif rtype == "slow_burn":
+            sb = SlowBurn(title=title, notes=result.get("notes"), dimension=result.get("dimension"))
+            storage.save_slow_burn(sb)
+            console.print(f"[green]Slow burn:[/green] {sb.title} [dim](id: {sb.id})[/dim]")
 
-    elif rtype == "transaction":
-        raw_tx_type = result.get("tx_type", "expense") or "expense"
-        try:
-            tx_type = TxType(raw_tx_type.lower())
-        except ValueError:
-            tx_type = TxType.EXPENSE
-        txn = Transaction(
-            amount=float(result.get("amount", 0)),
-            category=result.get("category", "general"),
-            description=result.get("description", title),
-            tx_type=tx_type,
-        )
-        # Auto-link to budget: if single active budget exists and it's an expense, link it
-        if tx_type == TxType.EXPENSE and not txn.budget_id:
-            active_budgets = [b for b in storage.get_budgets()
-                              if b.period_end >= date.today().isoformat()]
-            if len(active_budgets) == 1:
-                txn.budget_id = active_budgets[0].id
-        storage.save_transaction(txn)
-        type_label = "Income" if tx_type == TxType.INCOME else "Transaction"
-        console.print(f"[green]{type_label}:[/green] {txn.description} [dim]{config.currency}{txn.amount}[/dim]")
+        elif rtype == "event":
+            entry = CalendarEntry(
+                title=title,
+                entry_type=CalendarEntryType.EVENT,
+                date=date.today().isoformat(),
+                notes=result.get("notes"),
+            )
+            storage.save_calendar_entry(entry)
+            console.print(f"[green]Event:[/green] {entry.title} [dim](id: {entry.id})[/dim]")
 
-    elif rtype == "journal":
-        # Just keep in inbox as processed, save to today's journal append
-        existing = storage.load_journal() or ""
-        note = f"\n---\n{text}\n"
-        storage.save_journal(existing + note)
-        console.print(f"[green]Journal note saved.[/green]")
+        elif rtype == "transaction":
+            raw_tx_type = result.get("tx_type", "expense") or "expense"
+            try:
+                tx_type = TxType(raw_tx_type.lower())
+            except ValueError:
+                tx_type = TxType.EXPENSE
+            txn = Transaction(
+                amount=float(result.get("amount", 0)),
+                category=result.get("category", "general"),
+                description=result.get("description", title),
+                tx_type=tx_type,
+            )
+            # Auto-link to budget: if single active budget exists and it's an expense, link it
+            if tx_type == TxType.EXPENSE and not txn.budget_id:
+                active_budgets = [b for b in storage.get_budgets()
+                                  if b.period_end >= date.today().isoformat()]
+                if len(active_budgets) == 1:
+                    txn.budget_id = active_budgets[0].id
+            storage.save_transaction(txn)
+            type_label = "Income" if tx_type == TxType.INCOME else "Transaction"
+            console.print(f"[green]{type_label}:[/green] {txn.description} [dim]{config.currency}{txn.amount}[/dim]")
 
-    elif rtype == "review_flag":
-        # Append to a review flags file
-        flags_file = storage.HOME / "review_flags.md"
-        existing = flags_file.read_text() if flags_file.exists() else ""
-        flags_file.write_text(existing + f"\n- [{date.today().isoformat()}] {text}\n")
-        console.print(f"[green]Flagged for review:[/green] {text[:60]}")
+        elif rtype == "journal":
+            # Just keep in inbox as processed, save to today's journal append
+            existing = storage.load_journal() or ""
+            note = f"\n---\n{text}\n"
+            storage.save_journal(existing + note)
+            console.print(f"[green]Journal note saved.[/green]")
 
-    else:
-        console.print(f"[green]Captured.[/green] [dim](type: {rtype})[/dim]")
+        elif rtype == "review_flag":
+            # Append to a review flags file
+            flags_file = storage.HOME / "review_flags.md"
+            existing = flags_file.read_text() if flags_file.exists() else ""
+            flags_file.write_text(existing + f"\n- [{date.today().isoformat()}] {text}\n")
+            console.print(f"[green]Flagged for review:[/green] {text[:60]}")
+
+        else:
+            console.print(f"[green]Captured.[/green] [dim](type: {rtype})[/dim]")
 
     state = storage.touch_active(state)
     storage.save_state(state)
@@ -2944,147 +2944,29 @@ def main() -> None:
         prog="viyugam",
         description="A personal Life OS — text-only, Claude-powered",
     )
-    sub = parser.add_subparsers(dest="command", required=False)
-
-    # capture
-    p_capture = sub.add_parser("capture", help="Capture a thought to your inbox (deprecated: use log)")
-    p_capture.add_argument("text", nargs="+", help="The thought to capture")
-
-    # plan
-    p_plan = sub.add_parser("plan", help="Build today's schedule")
-    p_plan.add_argument("--replan", action="store_true", help="Replan from current time")
-
-    # done
-    p_done = sub.add_parser("done", help="Mark a task complete")
-    p_done.add_argument("task_id", nargs="?", help="Task ID (or partial) — omit for picker")
-
-    # status
-    p_status = sub.add_parser("status", help="Quick overview of today")
-
-    # log (replaces capture)
-    p_log_new = sub.add_parser("log", help="Universal input — routes anything to the right place")
-    p_log_new.add_argument("text", nargs="*", help="What to log (omit for journal session)")
-    p_log_new.add_argument("--force", action="store_true", help="Force new journal session even if logged today")
-
-    # edit
-    p_edit = sub.add_parser("edit", help="Edit a task")
-    p_edit.add_argument("task_id", help="Task ID")
-
-    # reschedule
-    p_reschedule = sub.add_parser("reschedule", help="Move a task to another date")
-    p_reschedule.add_argument("task_id", help="Task ID")
-    p_reschedule.add_argument("new_date", nargs="?", help="YYYY-MM-DD, 'tomorrow', or 'next-week'")
-
-    # snooze
-    p_snooze = sub.add_parser("snooze", help="Push a task to tomorrow")
-    p_snooze.add_argument("task_id", help="Task ID")
-
-    # backlog
-    p_backlog = sub.add_parser("backlog", help="Browse and schedule from backlog")
-
-    # milestones
-    p_milestones = sub.add_parser("milestones", help="View and add milestones")
-    p_milestones.add_argument("--add", action="store_true", help="Add a new milestone")
-    p_milestones.add_argument("--done", metavar="ID", help="Mark a milestone done")
-
-    # finance
-    p_finance = sub.add_parser("finance", help="Budget and spending overview")
-    p_finance_sub = p_finance.add_subparsers(dest="sub")
-    p_finance_sub.add_parser("budget", help="Create a budget")
-    p_finance_sub.add_parser("log", help="Log a transaction")
-    p_finance_sub.add_parser("summary", help="Show summary")
-    p_finance_sub.add_parser("history", help="Browse transactions month-by-month")
-    p_finance_sub.add_parser("recurring", help="Manage recurring items (EMIs, salary)")
-    p_finance_sub.add_parser("insights", help="Full AI finance analysis")
-
-    # constitution
-    p_constitution = sub.add_parser("constitution", help="View and edit your values document")
-
-    # think
-    p_think = sub.add_parser("think", help="Decision gateway. No args = review someday list")
-    p_think.add_argument("proposal", nargs="*", help="The proposal to debate")
-
-    # review
-    p_review = sub.add_parser("review", help="Weekly / monthly / quarterly review")
-    p_review.add_argument("--weekly",    action="store_true", help="Force weekly mode")
-    p_review.add_argument("--monthly",   action="store_true", help="Force monthly mode")
-    p_review.add_argument("--quarterly", action="store_true", help="Force quarterly mode")
-
-    # goals
-    p_goals = sub.add_parser("goals", help="View and manage long-term goals")
-    p_goals.add_argument("--add", action="store_true", help="Add a new goal")
-    p_goals.add_argument("title", nargs="*", help="Goal title (when using --add)")
-    p_goals.add_argument("--dimension", "-d", help="Dimension for the goal")
-
-    # research
-    p_research = sub.add_parser("research", help="Research a topic using web search")
-    p_research.add_argument("topic", nargs="+", help="The topic to research")
-
-    # calendar
-    p_calendar = sub.add_parser("calendar", help="View and add calendar events/blocks")
-    p_calendar.add_argument("--add", action="store_true", help="Add a new calendar entry")
-    p_calendar.add_argument("--delete", action="store_true", help="Delete a calendar entry")
-
-    # slow-burns
-    p_slow_burns = sub.add_parser("slow-burns", help="Browse long-horizon aspirations")
-    p_slow_burns.add_argument("--add", action="store_true", help="Add a new slow burn")
-
-    # decisions
-    p_decisions = sub.add_parser("decisions", help="Browse past boardroom decisions")
-
-    # okrs
-    p_okrs = sub.add_parser("okrs", help="View OKRs by quarter")
-
-    # horizon
-    p_horizon = sub.add_parser("horizon", help="4-12 week forward view")
-
-    # find
-    p_find = sub.add_parser("find", help="Semantic search across tasks and journals")
-    p_find.add_argument("query", nargs="*", help="Search query")
-
-    # setup
-    p_setup = sub.add_parser("setup", help="First-run configuration")
+    parser.add_argument(
+        "text",
+        nargs="*",
+        help="Natural language command (omit to open interactive REPL)",
+    )
 
     args = parser.parse_args()
+    text_parts = args.text
 
-    # No subcommand → open interactive REPL
-    if not args.command:
-        from viyugam.repl import run_repl
-        run_repl()
+    # `viyugam setup` — prerequisite wizard
+    if text_parts and text_parts[0] == "setup":
+        cmd_setup(argparse.Namespace())
         return
 
-    # Commands that require the API key
-    ai_commands = {"plan", "log", "think", "review", "research"}
-    if args.command in ai_commands:
-        if not _check_api_key():
-            sys.exit(1)
+    # `viyugam <text...>` — one-shot: classify + execute + exit
+    if text_parts:
+        from viyugam.repl import run_one_shot
+        run_one_shot(" ".join(text_parts))
+        return
 
-    _dispatch = {
-        "capture":     cmd_capture,
-        "plan":        cmd_plan,
-        "done":        cmd_done,
-        "status":      cmd_status,
-        "calendar":    cmd_calendar,
-        "log":         cmd_log,
-        "edit":        cmd_edit,
-        "reschedule":  cmd_reschedule,
-        "snooze":      cmd_snooze,
-        "backlog":     cmd_backlog,
-        "milestones":  cmd_milestones,
-        "slow-burns":  cmd_slow_burns,
-        "decisions":   cmd_decisions,
-        "finance":     cmd_finance,
-        "constitution": cmd_constitution,
-        "think":       cmd_think,
-        "review":      cmd_review,
-        "goals":       cmd_goals,
-        "research":    cmd_research,
-        "okrs":        cmd_okrs,
-        "horizon":     cmd_horizon,
-        "find":        cmd_find,
-        "setup":       cmd_setup,
-    }
-    _dispatch[args.command](args)
+    # No args → open interactive REPL
+    from viyugam.repl import run_repl
+    run_repl()
 
 
 if __name__ == "__main__":

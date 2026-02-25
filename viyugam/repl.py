@@ -1,136 +1,151 @@
 """
-repl.py — Interactive REPL for Viyugam.
+repl.py — Natural language REPL for Viyugam.
 Launched when `viyugam` is called with no arguments.
+Type naturally — Claude routes everything.
 """
 from __future__ import annotations
 import argparse
-import shlex
+import os
 import shutil
+from datetime import date, datetime
 
 from prompt_toolkit import PromptSession
-from prompt_toolkit.completion import Completer, Completion
 from prompt_toolkit.formatted_text import HTML
 from prompt_toolkit.history import FileHistory
 from prompt_toolkit.styles import Style
 from rich.console import Console
-from rich.table import Table
 
 import viyugam.storage as storage
 
 console = Console()
 
 
-# ── Greeting ──────────────────────────────────────────────────────────────────
+# ── Context summary ────────────────────────────────────────────────────────────
 
-_ART_LINES = [
-    "",
-    "[bold cyan]                                 ____       _      __  __ [/bold cyan]",
-    "[bold cyan] __   __  ___  __   __  _   _   / ___|   / \\   |  \\/  |[/bold cyan]",
-    "[bold cyan] \\ \\ / / |_ _| \\ \\ / / | | | | | |  _   / _ \\  | |\\/| |[/bold cyan]",
-    "[bold cyan]  \\ V /   | |   \\ V /  | |_| | | |_| | / ___ \\ | |  | |[/bold cyan]",
-    "[bold cyan]   \\_/   |___|   |_|    \\___/   \\____/ /_/   \\_\\|_|  |_|[/bold cyan]",
-    "",
-    "[dim]               வியூகம்  ·  personal life OS[/dim]",
-    "",
-]
+def _build_context_summary() -> str:
+    """Build a compact context string to pass to the intent classifier."""
+    today = date.today().isoformat()
+    now = datetime.now().strftime("%H:%M")
+    day_name = datetime.now().strftime("%A")
 
+    try:
+        from viyugam.models import TaskStatus
+        tasks_today = storage.get_tasks(scheduled_date=today, include_habits=False)
+        todo_today = [t for t in tasks_today if t.status in (TaskStatus.TODO, TaskStatus.IN_PROGRESS)]
+        task_names = ", ".join(t.title for t in todo_today[:3])
+
+        all_tasks = storage.get_tasks(include_habits=False)
+        overdue = [
+            t for t in all_tasks
+            if t.scheduled_date and t.scheduled_date < today
+            and t.status in (TaskStatus.TODO, TaskStatus.IN_PROGRESS)
+        ]
+
+        state = storage.load_state()
+        config = storage.load_config()
+
+        last_plan = state.last_plan_date or "never"
+        last_review = state.last_review_date or "never"
+        last_log = state.last_log_date or "never"
+
+        season_str = ""
+        if config.season:
+            season_str = f"Season: Q1 {today[:4]}, focus: {config.season.focus}"
+
+        resilience = state.resilience.value if state.resilience else "flow"
+
+        lines = [
+            f"Today: {day_name} {today}, {now}",
+            f"Tasks today: {len(todo_today)} ({task_names})" if todo_today else "Tasks today: 0",
+            f"Overdue: {len(overdue)}",
+            f"Last plan: {last_plan} | Last review: {last_review} | Last log: {last_log}",
+        ]
+        if season_str:
+            lines.append(season_str)
+        lines.append(f"Resilience: {resilience}")
+        return "\n".join(lines)
+    except Exception:
+        return f"Today: {day_name} {today}, {now}"
+
+
+# ── Greeting ───────────────────────────────────────────────────────────────────
 
 def _show_greeting() -> None:
-    for line in _ART_LINES:
-        console.print(line, justify="center")
+    """Show context-aware greeting on REPL start."""
+    today = date.today()
+    day_str = today.strftime("%A, %-d %b")
+
+    console.print()
+    console.print(f"[bold cyan]Viyugam[/bold cyan]  [dim]·[/dim]  [bold]{day_str}[/bold]")
+    console.print()
+
+    try:
+        from viyugam.models import TaskStatus
+        today_str = today.isoformat()
+        tasks_today = storage.get_tasks(scheduled_date=today_str, include_habits=False)
+        todo_today = [t for t in tasks_today if t.status in (TaskStatus.TODO, TaskStatus.IN_PROGRESS)]
+        all_tasks = storage.get_tasks(include_habits=False)
+        overdue = [
+            t for t in all_tasks
+            if t.scheduled_date and t.scheduled_date < today_str
+            and t.status in (TaskStatus.TODO, TaskStatus.IN_PROGRESS)
+        ]
+
+        state = storage.load_state()
+        parts = []
+        if todo_today:
+            parts.append(f"{len(todo_today)} task{'s' if len(todo_today) != 1 else ''} today")
+        if overdue:
+            parts.append(f"{len(overdue)} overdue")
+
+        if state.last_review_date:
+            try:
+                last = date.fromisoformat(state.last_review_date)
+                days_ago = (today - last).days
+                if days_ago >= 7:
+                    parts.append(f"Last review: {days_ago} days ago")
+            except Exception:
+                pass
+
+        if parts:
+            console.print(f"[dim]{'.  '.join(parts)}.[/dim]")
+            console.print()
+    except Exception:
+        pass
+
+    console.print("[dim]What's on your mind?[/dim]")
+    console.print()
 
 
-# ── Commands ──────────────────────────────────────────────────────────────────
-
-COMMANDS: dict[str, str] = {
-    "plan":    "Build today's schedule",
-    "log":     "Universal input — routes task/journal/habit/goal/event  /log <text>",
-    "done":    "Mark a task complete            /done <id>",
-    "edit":    "Edit a task                              /edit <id>",
-    "reschedule": "Move task to another date                /reschedule <id> [date]",
-    "snooze":  "Push task to tomorrow                    /snooze <id>",
-    "backlog":  "Browse and schedule from backlog",
-    "milestones": "View and add milestones          /milestones [--add] [--done <id>]",
-    "slow-burns": "Long-horizon aspirations          /slow-burns [--add]",
-    "decisions": "Browse past boardroom decisions",
-    "finance":  "Budget and spending overview",
-    "constitution": "View/edit your values document",
-    "think":   "Boardroom debate                /think <proposal>  (no args = someday list)",
-    "review":   "Weekly / monthly / quarterly review",
-    "goals":    "View and manage goals",
-    "research": "Research a topic using web search   /research <topic>",
-    "status":   "Quick overview of today",
-    "calendar": "View/add/delete calendar events    /calendar [--add|--delete]",
-    "okrs":    "View OKRs by quarter",
-    "horizon": "4-12 week forward view",
-    "find":    "Semantic search  /find <query>",
-    "setup":    "Update configuration",
-    "help":     "Show this help",
-    "exit":     "Exit Viyugam",
-    "capture":  "[dim]Deprecated — use /log[/dim]",
-}
-
-# All completions including flags — shown when user types /
-_COMPLETIONS = [
-    "/plan", "/plan --replan",
-    "/capture ",
-    "/done ",
-    "/log ", "/log",
-    "/edit ",
-    "/reschedule ", "/reschedule ",
-    "/snooze ",
-    "/backlog",
-    "/milestones", "/milestones --add", "/milestones --done ",
-    "/finance", "/finance budget", "/finance log", "/finance summary",
-    "/finance history", "/finance recurring", "/finance insights",
-    "/constitution",
-    "/think", "/think ",
-    "/review", "/review --weekly", "/review --monthly", "/review --quarterly",
-    "/goals", "/goals --add ",
-    "/research ",
-    "/status",
-    "/calendar", "/calendar --add", "/calendar --delete",
-    "/slow-burns", "/slow-burns --add",
-    "/decisions",
-    "/okrs",
-    "/horizon",
-    "/find ",
-    "/setup",
-    "/help",
-    "/exit",
-]
-
-
-# ── Completer ─────────────────────────────────────────────────────────────────
-
-class _SlashCompleter(Completer):
-    def get_completions(self, document, complete_event):
-        text = document.text_before_cursor
-        if not text.startswith("/"):
-            return
-        for candidate in _COMPLETIONS:
-            if candidate.lower().startswith(text.lower()):
-                yield Completion(
-                    candidate[len(text):],
-                    start_position=0,
-                    display=candidate.rstrip(),
-                )
-
-
-# ── Help ──────────────────────────────────────────────────────────────────────
+# ── Help ───────────────────────────────────────────────────────────────────────
 
 def _show_help() -> None:
-    table = Table(show_header=False, box=None, padding=(0, 2))
-    table.add_column(style="cyan", no_wrap=True)
-    table.add_column(style="dim")
-    for cmd, desc in COMMANDS.items():
-        table.add_row(f"/{cmd}", desc)
     console.print()
-    console.print(table)
+    console.print("[bold]What Viyugam can do:[/bold]")
+    console.print()
+    items = [
+        ("Plan your day",         "\"plan my day\" or \"what should I do today\""),
+        ("Add tasks / notes",     "Just type it — \"call dentist tomorrow\" or \"read clean code\""),
+        ("Mark things done",      "\"finished the report\" or \"done with API task\""),
+        ("Think through decisions","\"should I take that job offer?\""),
+        ("Log expenses/income",   "\"spent 2000 on groceries\" or \"got salary 80k\""),
+        ("Finance overview",      "\"show finances\" or \"spending summary\""),
+        ("Goals",                 "\"show my goals\" or \"I want to run a marathon\""),
+        ("Weekly review",         "\"weekly review\" or \"quarterly review\""),
+        ("Research",              "\"research Python async patterns\""),
+        ("Search your data",      "\"find tasks about dentist\""),
+        ("Calendar",              "\"show calendar\" or \"what's on this week\""),
+        ("Your constitution",     "\"show my values\" or \"constitution\""),
+        ("Morning check-in",      "\"morning\" or \"hi\" or \"good morning\""),
+    ]
+    for label, example in items:
+        console.print(f"  [cyan]{label:<26}[/cyan] [dim]{example}[/dim]")
+    console.print()
+    console.print("[dim]No slash commands. Just talk.[/dim]")
     console.print()
 
 
-# ── Task picker ───────────────────────────────────────────────────────────────
+# ── Task picker ────────────────────────────────────────────────────────────────
 
 def _pick_task():
     """Interactive numbered task picker. Returns a Task or None."""
@@ -147,6 +162,7 @@ def _pick_task():
         console.print("[dim]No active tasks found.[/dim]")
         return None
 
+    from rich.table import Table
     def _render(tasks) -> None:
         tbl = Table(box=None, show_header=True, header_style="bold dim", padding=(0, 1))
         tbl.add_column("#", style="dim", width=4)
@@ -178,7 +194,6 @@ def _pick_task():
                 return current[idx]
             console.print(f"[red]Out of range.[/red] Pick 1–{len(current)}.")
         else:
-            # Filter by title/id
             filtered = [
                 t for t in active
                 if raw.lower() in t.title.lower() or raw.lower() in t.id.lower()
@@ -190,187 +205,210 @@ def _pick_task():
                 _render(current)
 
 
-# ── Dispatcher ────────────────────────────────────────────────────────────────
+# ── Done-by-hint ───────────────────────────────────────────────────────────────
 
-def _dispatch(line: str) -> None:
-    """Parse a slash command line and call the appropriate cmd_* function."""
+def _done_by_hint(hint: str | None) -> None:
+    """Mark a task done by fuzzy-matching hint text. Falls back to picker."""
+    from viyugam.main import cmd_done
+    from viyugam.models import TaskStatus
+
+    if not hint:
+        cmd_done(argparse.Namespace(task_id=None))
+        return
+
+    hint_lower = hint.lower()
+    all_tasks = storage.get_tasks(include_habits=False)
+    active = [
+        t for t in all_tasks
+        if t.status in (TaskStatus.TODO, TaskStatus.IN_PROGRESS, TaskStatus.BACKLOG)
+    ]
+
+    # Score each task by word overlap
+    hint_words = set(hint_lower.split())
+
+    def _score(task) -> int:
+        title_lower = task.title.lower()
+        # Substring match scores highest
+        if hint_lower in title_lower:
+            return 100
+        # Word overlap
+        title_words = set(title_lower.split())
+        return len(hint_words & title_words)
+
+    scored = [(t, _score(t)) for t in active]
+    scored = [(t, s) for t, s in scored if s > 0]
+    scored.sort(key=lambda x: x[1], reverse=True)
+
+    if not scored:
+        console.print(f"[yellow]No tasks matching \"{hint}\" found.[/yellow] Showing picker.")
+        task = _pick_task()
+        if task:
+            cmd_done(argparse.Namespace(task_id=task.id))
+        return
+
+    best_task, best_score = scored[0]
+    # If clear single winner or strong match, mark directly
+    if len(scored) == 1 or best_score >= 100 or (best_score > 0 and scored[0][1] > scored[1][1] * 2):
+        cmd_done(argparse.Namespace(task_id=best_task.id))
+        return
+
+    # Multiple plausible matches — show picker filtered to top candidates
+    console.print(f"[dim]Multiple matches for \"{hint}\".[/dim]")
+    task = _pick_task()
+    if task:
+        cmd_done(argparse.Namespace(task_id=task.id))
+
+
+# ── AI Dispatcher ──────────────────────────────────────────────────────────────
+
+def _ai_dispatch(text: str) -> None:
+    """Classify text with AI, then execute each action in the returned list."""
     from viyugam.main import (
-        cmd_capture, cmd_plan, cmd_done, cmd_log, cmd_edit,
-        cmd_reschedule, cmd_snooze, cmd_backlog, cmd_milestones,
-        cmd_slow_burns, cmd_decisions,
-        cmd_finance, cmd_constitution,
-        cmd_think, cmd_review, cmd_goals, cmd_status, cmd_setup,
-        cmd_research, cmd_calendar, _check_api_key,
-        cmd_okrs, cmd_horizon, cmd_find,
+        cmd_plan, cmd_log, cmd_done, cmd_think, cmd_review,
+        cmd_status, cmd_finance, cmd_goals, cmd_decisions,
+        cmd_backlog, cmd_horizon, cmd_okrs, cmd_slow_burns,
+        cmd_research, cmd_find, cmd_calendar, cmd_constitution,
+        _check_api_key, _log_entry,
     )
+    from viyugam.agents.intent import classify_intent
 
-    # Strip leading slash
-    if line.startswith("/"):
-        line = line[1:]
+    if not _check_api_key():
+        return
 
     try:
-        parts = shlex.split(line)
-    except ValueError as e:
-        console.print(f"[red]Parse error:[/red] {e}")
+        context = _build_context_summary()
+        actions = classify_intent(text, context)
+    except Exception as e:
+        console.print(f"[red]Classification error:[/red] {e}")
         return
 
-    if not parts:
+    for item in actions:
+        action = item.get("action", "unknown")
+        args = item.get("args", {}) or {}
+        clarify = item.get("clarify")
+
+        if action == "unknown":
+            if clarify:
+                console.print(f"[dim]{clarify}[/dim]")
+                try:
+                    from prompt_toolkit.shortcuts import prompt as pt_prompt
+                    follow_up = pt_prompt("> ").strip()
+                    if follow_up:
+                        _ai_dispatch(follow_up)
+                except (KeyboardInterrupt, EOFError):
+                    pass
+            return
+
+        if action == "plan_day":
+            cmd_plan(argparse.Namespace(replan=False))
+
+        elif action == "log_content":
+            text_val = args.get("text") or text
+            _log_entry(text_val)
+
+        elif action == "mark_done":
+            _done_by_hint(args.get("task_title_hint"))
+
+        elif action == "run_think":
+            proposal = args.get("proposal") or text
+            cmd_think(argparse.Namespace(proposal=[proposal]))
+
+        elif action == "run_review":
+            cadence = (args.get("review_cadence") or "").lower()
+            cmd_review(argparse.Namespace(
+                weekly=(cadence == "weekly"),
+                monthly=(cadence == "monthly"),
+                quarterly=(cadence == "quarterly"),
+            ))
+
+        elif action == "show_status":
+            cmd_status(argparse.Namespace())
+
+        elif action == "show_finance":
+            cmd_finance(argparse.Namespace(sub="summary"))
+
+        elif action == "log_finance":
+            text_val = args.get("text") or text
+            _log_entry(text_val)
+
+        elif action == "finance_history":
+            cmd_finance(argparse.Namespace(sub="history"))
+
+        elif action == "finance_recurring":
+            cmd_finance(argparse.Namespace(sub="recurring"))
+
+        elif action == "finance_insights":
+            cmd_finance(argparse.Namespace(sub="insights"))
+
+        elif action == "show_goals":
+            cmd_goals(argparse.Namespace(add=False, title=[], dimension=None))
+
+        elif action == "add_goal":
+            text_val = args.get("text") or text
+            _log_entry(text_val)
+
+        elif action == "show_decisions":
+            cmd_decisions(argparse.Namespace())
+
+        elif action == "show_backlog":
+            cmd_backlog(argparse.Namespace())
+
+        elif action == "show_horizon":
+            cmd_horizon(argparse.Namespace())
+
+        elif action == "show_okrs":
+            cmd_okrs(argparse.Namespace())
+
+        elif action == "show_slow_burns":
+            cmd_slow_burns(argparse.Namespace(add=False))
+
+        elif action == "run_research":
+            query = args.get("query") or text
+            cmd_research(argparse.Namespace(topic=query.split()))
+
+        elif action == "run_find":
+            query = args.get("query") or text
+            cmd_find(argparse.Namespace(query=query.split()))
+
+        elif action == "show_calendar":
+            cmd_calendar(argparse.Namespace(add=False, delete=False))
+
+        elif action == "show_constitution":
+            cmd_constitution(argparse.Namespace())
+
+        elif action == "help":
+            _show_help()
+
+        else:
+            console.print(f"[dim]Unknown action: {action}[/dim]")
+
+
+# ── One-shot entry (from CLI with text args) ───────────────────────────────────
+
+def run_one_shot(text: str) -> None:
+    """Classify and execute a single natural language command, then exit."""
+    import os
+    storage.ensure_dirs()
+
+    if not storage.CONFIG_FILE.exists():
+        console.print("[yellow]No config found.[/yellow] Run [bold]viyugam setup[/bold] first.")
         return
 
-    cmd = parts[0].lower()
-    rest = parts[1:]
-    flags = set(rest)
+    if not os.environ.get("ANTHROPIC_API_KEY"):
+        try:
+            cfg = storage.load_config()
+            if cfg.api_key:
+                os.environ["ANTHROPIC_API_KEY"] = cfg.api_key
+        except Exception:
+            pass
 
-    AI_COMMANDS = {"plan", "log", "think", "review", "research"}
-
-    if cmd in AI_COMMANDS and not _check_api_key():
-        return
-
-    if cmd == "plan":
-        cmd_plan(argparse.Namespace(replan="--replan" in flags))
-
-    elif cmd in ("capture", "c"):
-        if not rest:
-            console.print("[yellow]Usage:[/yellow] /capture <text>")
-            return
-        cmd_capture(argparse.Namespace(text=rest))
-
-    elif cmd == "done":
-        task_id = rest[0] if rest else None
-        cmd_done(argparse.Namespace(task_id=task_id))
-
-    elif cmd == "log":
-        if not _check_api_key():
-            return
-        cmd_log(argparse.Namespace(text=rest if rest else None, force="--force" in flags))
-
-    elif cmd == "edit":
-        if not rest:
-            console.print("[yellow]Usage:[/yellow] /edit <task-id>")
-            return
-        cmd_edit(argparse.Namespace(task_id=rest[0]))
-
-    elif cmd == "reschedule":
-        if not rest:
-            console.print("[yellow]Usage:[/yellow] /reschedule <task-id> [date]")
-            return
-        cmd_reschedule(argparse.Namespace(
-            task_id=rest[0],
-            new_date=rest[1] if len(rest) > 1 else None,
-        ))
-
-    elif cmd == "snooze":
-        if not rest:
-            console.print("[yellow]Usage:[/yellow] /snooze <task-id>")
-            return
-        cmd_snooze(argparse.Namespace(task_id=rest[0]))
-
-    elif cmd == "backlog":
-        cmd_backlog(argparse.Namespace())
-
-    elif cmd == "finance":
-        sub = rest[0] if rest and rest[0] in (
-            "budget", "log", "summary", "history", "recurring", "insights"
-        ) else "summary"
-        cmd_finance(argparse.Namespace(sub=sub))
-
-    elif cmd == "constitution":
-        cmd_constitution(argparse.Namespace())
-
-    elif cmd == "think":
-        if not rest:
-            task = _pick_task()
-            if task is not None:
-                context = task.notes or (task.dimension.value if task.dimension else "")
-                proposal = f'"{task.title}"\n\nContext: {context}'
-                cmd_think(argparse.Namespace(proposal=[proposal]))
-                return
-        cmd_think(argparse.Namespace(proposal=rest))
-
-    elif cmd == "review":
-        cmd_review(argparse.Namespace(
-            weekly="--weekly" in flags,
-            monthly="--monthly" in flags,
-            quarterly="--quarterly" in flags,
-        ))
-
-    elif cmd == "goals":
-        # /goals --add title words --dimension career
-        add = "--add" in flags
-        dimension = None
-        title_parts = []
-        i = 0
-        while i < len(rest):
-            if rest[i] in ("--dimension", "-d") and i + 1 < len(rest):
-                dimension = rest[i + 1]
-                i += 2
-            elif rest[i] == "--add":
-                i += 1
-            else:
-                title_parts.append(rest[i])
-                i += 1
-        cmd_goals(argparse.Namespace(add=add, title=title_parts, dimension=dimension))
-
-    elif cmd == "research":
-        if not rest:
-            task = _pick_task()
-            if task is None:
-                return
-            topic = f"{task.title} {task.notes or ''}".strip()
-            cmd_research(argparse.Namespace(topic=[topic]))
-            return
-        cmd_research(argparse.Namespace(topic=rest))
-
-    elif cmd == "status":
-        cmd_status(argparse.Namespace())
-
-    elif cmd == "calendar":
-        add = "--add" in flags
-        delete = "--delete" in flags
-        cmd_calendar(argparse.Namespace(add=add, delete=delete))
-
-    elif cmd in ("slow-burns", "slowburns"):
-        cmd_slow_burns(argparse.Namespace(add="--add" in flags))
-
-    elif cmd == "decisions":
-        cmd_decisions(argparse.Namespace())
-
-    elif cmd == "milestones":
-        done_id = None
-        add = "--add" in flags
-        if "--done" in rest:
-            idx = rest.index("--done")
-            if idx + 1 < len(rest):
-                done_id = rest[idx + 1]
-        cmd_milestones(argparse.Namespace(add=add, done=done_id))
-
-    elif cmd == "okrs":
-        cmd_okrs(argparse.Namespace())
-
-    elif cmd == "horizon":
-        cmd_horizon(argparse.Namespace())
-
-    elif cmd == "find":
-        cmd_find(argparse.Namespace(query=rest))
-
-    elif cmd == "setup":
-        cmd_setup(argparse.Namespace())
-
-    elif cmd in ("help", "?"):
-        _show_help()
-
-    elif cmd in ("exit", "quit", "q"):
-        raise SystemExit(0)
-
-    else:
-        console.print(f"[red]Unknown command:[/red] /{cmd}   (type /help for commands)")
+    _ai_dispatch(text)
 
 
-# ── Visual style ─────────────────────────────────────────────────────────────
+# ── Visual style ───────────────────────────────────────────────────────────────
 
 _STYLE = Style.from_dict({
     "prompt":         "#ffffff bold",
-    "border":         "#555555",
     "bottom-toolbar": "bg:#1a1a1a #555555",
 })
 
@@ -380,26 +418,13 @@ def _cols() -> int:
 
 
 def _bottom_toolbar() -> HTML:
-    inner = _cols() - 2
-    hints = "  /help · Tab · Ctrl-D to exit  "
-    side = (inner - len(hints)) // 2
-    return HTML(
-        f'<bottom-toolbar>╰{"─" * side}{hints}{"─" * (inner - side - len(hints))}╯</bottom-toolbar>'
-    )
+    return HTML('<bottom-toolbar>  Type naturally · Ctrl-D to exit  </bottom-toolbar>')
 
 
-def _prompt_message() -> HTML:
-    """Top border + prompt rendered as one atomic prompt_toolkit message."""
-    inner = _cols() - 2
-    top = f'╭{"─" * inner}╮\n'
-    return HTML(f'<border>{top}│</border> <prompt>›</prompt> ')
-
-
-# ── REPL entry ────────────────────────────────────────────────────────────────
+# ── REPL entry ─────────────────────────────────────────────────────────────────
 
 def run_repl() -> None:
     """Start the interactive Viyugam session."""
-    import os
     storage.ensure_dirs()
 
     # First-run: no config → run setup before entering loop
@@ -423,8 +448,7 @@ def run_repl() -> None:
     history_path = storage.HOME / "history"
     session: PromptSession = PromptSession(
         history=FileHistory(str(history_path)),
-        completer=_SlashCompleter(),
-        complete_while_typing=True,
+        complete_while_typing=False,
         bottom_toolbar=_bottom_toolbar,
         style=_STYLE,
     )
@@ -433,7 +457,7 @@ def run_repl() -> None:
 
     while True:
         try:
-            text = session.prompt(_prompt_message)
+            text = session.prompt("> ")
         except KeyboardInterrupt:
             console.print()
             continue
@@ -445,20 +469,12 @@ def run_repl() -> None:
         if not text:
             continue
 
-        # Bare exit/quit without slash
         if text.lower() in ("exit", "quit", "q"):
             console.print("\n[dim]Goodbye.[/dim]\n")
             break
 
-        # Non-slash input: hint
-        if not text.startswith("/"):
-            console.print(
-                "[dim]  Use /capture to add to inbox, or /help for all commands.[/dim]\n"
-            )
-            continue
-
         try:
-            _dispatch(text)
+            _ai_dispatch(text)
         except SystemExit as e:
             if e.code == 0:
                 console.print("\n[dim]Goodbye.[/dim]\n")
