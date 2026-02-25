@@ -187,6 +187,22 @@ class ActualRecord(BaseModel):
     created_at:      str           = Field(default_factory=lambda: datetime.now().isoformat())
 
 
+class KeyResult(BaseModel):
+    id:      str  = Field(default_factory=new_id)
+    text:    str
+    target:  Optional[str] = None    # e.g. "complete 3 projects"
+    is_done: bool = False
+
+class OKR(BaseModel):
+    id:          str  = Field(default_factory=new_id)
+    quarter:     str                     # e.g. "2026-Q1"
+    objective:   str
+    dimension:   Optional[Dimension] = None
+    key_results: list[KeyResult]     = []
+    is_active:   bool = True
+    created_at:  str  = Field(default_factory=lambda: datetime.now().isoformat())
+
+
 # ── Config (loaded from config.yaml) ──────────────────────────────────────────
 
 class SeasonConfig(BaseModel):

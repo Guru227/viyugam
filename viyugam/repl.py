@@ -61,6 +61,9 @@ COMMANDS: dict[str, str] = {
     "research": "Research a topic using web search   /research <topic>",
     "status":   "Quick overview of today",
     "calendar": "View/add/delete calendar events    /calendar [--add|--delete]",
+    "okrs":    "View OKRs by quarter",
+    "horizon": "4-12 week forward view",
+    "find":    "Semantic search  /find <query>",
     "setup":    "Update configuration",
     "help":     "Show this help",
     "exit":     "Exit Viyugam",
@@ -88,6 +91,9 @@ _COMPLETIONS = [
     "/calendar", "/calendar --add", "/calendar --delete",
     "/slow-burns", "/slow-burns --add",
     "/decisions",
+    "/okrs",
+    "/horizon",
+    "/find ",
     "/setup",
     "/help",
     "/exit",
@@ -194,6 +200,7 @@ def _dispatch(line: str) -> None:
         cmd_finance, cmd_constitution,
         cmd_think, cmd_review, cmd_goals, cmd_status, cmd_setup,
         cmd_research, cmd_calendar, _check_api_key,
+        cmd_okrs, cmd_horizon, cmd_find,
     )
 
     # Strip leading slash
@@ -333,6 +340,15 @@ def _dispatch(line: str) -> None:
             if idx + 1 < len(rest):
                 done_id = rest[idx + 1]
         cmd_milestones(argparse.Namespace(add=add, done=done_id))
+
+    elif cmd == "okrs":
+        cmd_okrs(argparse.Namespace())
+
+    elif cmd == "horizon":
+        cmd_horizon(argparse.Namespace())
+
+    elif cmd == "find":
+        cmd_find(argparse.Namespace(query=rest))
 
     elif cmd == "setup":
         cmd_setup(argparse.Namespace())

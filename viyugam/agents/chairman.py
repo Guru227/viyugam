@@ -90,8 +90,8 @@ PLAN_SYSTEM = """You are the Chairman — a tactical planning agent for Viyugam,
 Your job: build a realistic, humane daily schedule.
 
 Rules:
-1. Use the user's actual energy patterns from journal entries. Do NOT assume fixed circadian
-   rhythms. If no journal data: default to morning = deep work, afternoon = shallow, evening = light.
+1. Use YOUR PERSONAL ENERGY PATTERN if provided — it overrides all defaults.
+   If no pattern data: default to morning=deep, afternoon=shallow, evening=light.
 2. High energy tasks (cost 7-10) go in peak energy windows.
 3. Low energy tasks (cost 1-4) go in low energy windows.
 4. Insert a 15-minute break after every 90 minutes of focused work.
@@ -168,6 +168,7 @@ def plan_day(
     calendar_events: list[dict] | None = None,
     memory_context: str = "",
     constitution: str = "",
+    energy_pattern: dict | None = None,
 ) -> dict:
     """
     Generate a time-blocked daily schedule.
@@ -188,6 +189,17 @@ def plan_day(
     if config.get("season"):
         s = config["season"]
         season_info = f"Current season: {s.get('name', '')} | Focus: {s.get('focus', '')} | Secondary: {s.get('secondary', '')}"
+
+    energy_section = ""
+    if energy_pattern:
+        ep = energy_pattern
+        energy_section = (
+            f"\nYOUR PERSONAL ENERGY PATTERN (from journal analysis — use instead of defaults):\n"
+            f"  Peak hours: {ep.get('peak_hours', 'unknown')}\n"
+            f"  Low energy: {ep.get('low_energy', 'unknown')}\n"
+            f"  Best for deep work: {ep.get('best_for_deep_work', 'unknown')}\n"
+            f"  Pattern: {ep.get('pattern_summary', '')}\n"
+        )
 
     catch_up_section = ""
     if catch_up_notes:
@@ -220,7 +232,7 @@ CURRENT TIME: {current_time}
 DAY START HOUR: {config.get('day_start', 10):02d}:00
 USER: {config.get('user_name', 'friend')}
 Work hours cap: {config.get('work_hours_cap', 8)}h
-{season_info}
+{season_info}{energy_section}
 {schedule_context}{calendar_context}{catch_up_section}{constitution_section}{memory_section}
 TASKS DUE TODAY OR OVERDUE (remaining):
 {json.dumps(tasks, indent=2) if tasks else "None scheduled yet."}

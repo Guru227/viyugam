@@ -21,7 +21,7 @@ import json
 import os
 import re
 import sys
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 from rich.console import Console
 from rich.panel import Panel
@@ -35,6 +35,7 @@ from viyugam.models import (
     Task, Project, TaskStatus, ResilienceState, SystemState,
     CalendarEntry, CalendarEntryType,
     SlowBurn, Milestone, Budget, Transaction, Decision, ActualRecord,
+    OKR, KeyResult,
 )
 
 console = Console()
@@ -168,6 +169,9 @@ def cmd_plan(args: argparse.Namespace) -> None:
     # ── Mode-specific prompts ──────────────────────────────────────────────────
     catch_up_notes = ""
 
+    # If called from _post_plan_session with pre-filled notes, skip prompts
+    _prefilled_notes = getattr(args, "_catch_up_notes", None)
+
     if mode == "midday":
         done_today = [
             t for t in storage.get_tasks(status="done")
@@ -181,18 +185,24 @@ def cmd_plan(args: argparse.Namespace) -> None:
             console.print()
         else:
             console.print(f"[dim]It's {current_time} — planning the rest of your day.[/dim]\n")
-        catch_up_notes = Prompt.ask(
-            "What did you get done this morning?",
-            default="",
-        )
+        if _prefilled_notes is not None:
+            catch_up_notes = _prefilled_notes
+        else:
+            catch_up_notes = Prompt.ask(
+                "What did you get done this morning?",
+                default="",
+            )
         console.print()
 
     elif mode == "replan":
         console.print(f"\n[dim]It's {current_time}. Replanning from now.[/dim]\n")
-        catch_up_notes = Prompt.ask(
-            "What changed?  [dim](e.g. meeting ran long, low energy, new priority — Enter for clean replan)[/dim]",
-            default="",
-        )
+        if _prefilled_notes is not None:
+            catch_up_notes = _prefilled_notes
+        else:
+            catch_up_notes = Prompt.ask(
+                "What changed?  [dim](e.g. meeting ran long, low energy, new priority — Enter for clean replan)[/dim]",
+                default="",
+            )
         console.print()
 
     # ── Schedule context ───────────────────────────────────────────────────────
@@ -253,6 +263,13 @@ def cmd_plan(args: argparse.Namespace) -> None:
     memory_context = storage.get_memory_context()
     constitution   = storage.load_constitution()
 
+    # Load energy pattern (cached, won't call API if fresh)
+    energy_pattern = {}
+    try:
+        energy_pattern = storage.get_energy_pattern()
+    except Exception:
+        pass
+
     # 3. Generate schedule
     status_msg = {
         "full":   "Building your schedule...",
@@ -277,6 +294,7 @@ def cmd_plan(args: argparse.Namespace) -> None:
             calendar_events=[e.model_dump() for e in calendar_events],
             memory_context=memory_context,
             constitution=constitution,
+            energy_pattern=energy_pattern,
         )
 
     # 4. Move backlogged tasks
@@ -297,6 +315,7 @@ def cmd_plan(args: argparse.Namespace) -> None:
         and not t.is_habit
     ]
     _render_plan(plan, today, config.user_name, backlog_tasks=backlog_tasks)
+    _post_plan_session(plan, today)
 
     # Update rolling memory
     summary = f"Planned {len(all_tasks)} tasks, mode={mode}, day_type={day_type}"
@@ -515,6 +534,60 @@ def _show_nudges(nudges: list[str]) -> None:
         console.print()
         for nudge in nudges:
             console.print(f"  [dim]→ {nudge}[/dim]")
+
+
+def _post_plan_session(plan: dict, today: str) -> None:
+    """Brief interactive loop after plan renders. Lets user act on the schedule."""
+    console.print("[dim]  d=done  s=snooze  r=replan  Enter=exit[/dim]")
+    state = storage.load_state()
+
+    while True:
+        try:
+            raw = Prompt.ask("Plan action", default="").strip().lower()
+        except (KeyboardInterrupt, EOFError):
+            break
+
+        if not raw or raw in ("q", "exit", "done"):
+            break
+
+        elif raw == "d":
+            task = _pick_task_for_done()
+            if task:
+                _complete_task(task, state)
+
+        elif raw == "s":
+            # pick from scheduled tasks
+            scheduled = [
+                t for t in storage.get_tasks(scheduled_date=today)
+                if t.status == TaskStatus.TODO
+            ]
+            if not scheduled:
+                console.print("[dim]No scheduled tasks to snooze.[/dim]")
+                continue
+            tbl = Table(box=box.SIMPLE, show_header=False, padding=(0, 1))
+            tbl.add_column("#", style="dim", width=3)
+            tbl.add_column("Title")
+            for i, t in enumerate(scheduled[:10], 1):
+                tbl.add_row(str(i), t.title)
+            console.print(tbl)
+            pick = Prompt.ask("Snooze which?", default="").strip()
+            if pick.isdigit():
+                idx = int(pick) - 1
+                if 0 <= idx < len(scheduled[:10]):
+                    task = scheduled[idx]
+                    task.scheduled_date = (date.today() + timedelta(days=1)).isoformat()
+                    storage.save_task(task)
+                    console.print(f"[dim]Snoozed: {task.title}[/dim]")
+
+        elif raw == "r":
+            notes = Prompt.ask("What changed?", default="").strip()
+            console.print()
+            # Rerun plan in replan mode
+            cmd_plan(argparse.Namespace(replan=True, _catch_up_notes=notes))
+            break
+
+        else:
+            console.print("[dim]  d=done  s=snooze  r=replan  Enter=exit[/dim]")
 
 
 # ── done ───────────────────────────────────────────────────────────────────────
@@ -1884,6 +1957,7 @@ def cmd_review(args: argparse.Namespace) -> None:
             break
 
     # Save review
+    markdown = ""  # will be set inside try block
     if len(history) > 1:
         console.print("\n[dim]Saving review...[/dim]")
         try:
@@ -1941,11 +2015,49 @@ def cmd_review(args: argparse.Namespace) -> None:
                     d.revisited_at = date.today().isoformat()
                     storage.save_decision(d)
 
-        # Quarterly: offer season reset
-        if cadence == "quarterly" and config.season:
-            console.print()
-            if Confirm.ask("Update your season for next quarter?"):
+        # Quarterly: offer season reset and OKR generation
+        if cadence == "quarterly":
+            if config.season and Confirm.ask("Update your season for next quarter?"):
                 _update_season(config)
+
+            # Generate OKRs for next quarter
+            if Confirm.ask("\nGenerate OKRs for next quarter?", default=True):
+                from viyugam.agents.reviewer import generate_okrs
+                from viyugam.models import Dimension as _Dim
+                next_q = storage.get_next_quarter()
+                current_q = storage.get_current_quarter()
+                okr_goals = [g.model_dump() for g in storage.get_goals()]
+                season_focus = config.season.focus.value if config.season else ""
+                constitution = storage.load_constitution()
+
+                with console.status(f"[dim]Planning {next_q}...[/dim]"):
+                    try:
+                        raw_okrs = generate_okrs(
+                            review_summary=markdown,
+                            goals=okr_goals,
+                            current_quarter=current_q,
+                            next_quarter=next_q,
+                            season_focus=season_focus,
+                            constitution=constitution,
+                        )
+                    except Exception as e:
+                        console.print(f"[yellow]OKR generation skipped: {e}[/yellow]")
+                        raw_okrs = []
+
+                if raw_okrs:
+                    console.print(f"\n[bold]OKRs for {next_q}[/bold]\n")
+                    for raw in raw_okrs:
+                        dim_raw = raw.get("dimension", "")
+                        dim = _Dim(dim_raw) if dim_raw in [d.value for d in _Dim] else None
+                        krs = [KeyResult(text=kr["text"], target=kr.get("target")) for kr in raw.get("key_results", [])]
+                        okr = OKR(quarter=next_q, objective=raw["objective"], dimension=dim, key_results=krs)
+                        storage.save_okr(okr)
+                        style = "cyan" if dim else "white"
+                        console.print(f"  [{style}]O:[/{style}] {okr.objective}")
+                        for kr in okr.key_results:
+                            target_str = f" [dim]({kr.target})[/dim]" if kr.target else ""
+                            console.print(f"     [dim]KR:[/dim] {kr.text}{target_str}")
+                    console.print()
 
         state = storage.touch_active(state)
         state.last_review = today
@@ -2182,6 +2294,219 @@ def cmd_research(args: argparse.Namespace) -> None:
     storage.save_state(state)
 
 
+# ── okrs ───────────────────────────────────────────────────────────────────────
+
+def cmd_okrs(args: argparse.Namespace) -> None:
+    startup_check()
+    config = storage.load_config()
+    current_q = storage.get_current_quarter()
+
+    okrs = storage.get_okrs(active_only=False)
+    if not okrs:
+        console.print(
+            f"\n[dim]No OKRs yet.[/dim]\n"
+            "Generate them during a quarterly review: [bold]/review --quarterly[/bold]\n"
+        )
+        return
+
+    # Group by quarter
+    by_q: dict[str, list] = {}
+    for o in okrs:
+        by_q.setdefault(o.quarter, []).append(o)
+
+    console.print()
+    for q in sorted(by_q.keys(), reverse=True):
+        is_current = q == current_q
+        q_style = "bold cyan" if is_current else "bold dim"
+        console.print(f"[{q_style}]{q}{'  ← current' if is_current else ''}[/{q_style}]")
+        for o in by_q[q]:
+            dim_str = f" [dim]({o.dimension.value})[/dim]" if o.dimension else ""
+            done_krs = sum(1 for kr in o.key_results if kr.is_done)
+            total_krs = len(o.key_results)
+            progress = f" [dim]{done_krs}/{total_krs} KRs[/dim]" if total_krs else ""
+            console.print(f"  [cyan]O:[/cyan] {o.objective}{dim_str}{progress}")
+            for kr in o.key_results:
+                mark = "[green]✓[/green]" if kr.is_done else "[dim]○[/dim]"
+                target = f" [dim]({kr.target})[/dim]" if kr.target else ""
+                console.print(f"     {mark} {kr.text}{target}")
+        console.print()
+
+
+# ── horizon ─────────────────────────────────────────────────────────────────────
+
+def cmd_horizon(args: argparse.Namespace) -> None:
+    """4-12 week forward view: milestones, deadlines, OKRs."""
+    startup_check()
+    config = storage.load_config()
+    today = date.today()
+
+    # Collect all dated items in the next 12 weeks
+    cutoff = (today + timedelta(weeks=12)).isoformat()
+    today_str = today.isoformat()
+
+    milestones = [m for m in storage.get_milestones()
+                  if not m.is_done and m.due_date and today_str <= m.due_date <= cutoff]
+    tasks_with_dates = [t for t in storage.get_tasks()
+                        if t.scheduled_date and today_str <= t.scheduled_date <= cutoff
+                        and t.status != TaskStatus.DONE]
+    goals = storage.get_goals()
+    okrs = storage.get_okrs()
+    current_okr_krs = [(o, kr) for o in okrs for kr in o.key_results if not kr.is_done]
+
+    # Band by week
+    console.print()
+    for week_offset in range(12):
+        week_start = today + timedelta(weeks=week_offset)
+        week_end   = week_start + timedelta(days=6)
+        ws = week_start.isoformat()
+        we = week_end.isoformat()
+
+        week_milestones = [m for m in milestones if ws <= m.due_date <= we]
+        week_tasks = [t for t in tasks_with_dates if ws <= t.scheduled_date <= we]
+
+        if not week_milestones and not week_tasks and week_offset > 0:
+            continue
+
+        label = f"Week {week_offset + 1}  [dim]{ws} – {we}[/dim]"
+        if week_offset == 0:
+            label = f"[bold]This week[/bold]  [dim]{ws} – {we}[/dim]"
+
+        items = []
+        for m in week_milestones:
+            goal_title = ""
+            if m.goal_id:
+                for g in goals:
+                    if g.id == m.goal_id:
+                        goal_title = f" [dim]({g.title[:30]})[/dim]"
+            items.append(f"  [cyan]◆[/cyan] {m.title}{goal_title} [dim]due {m.due_date}[/dim]")
+        for t in week_tasks[:5]:
+            dim = f" [dim]{t.dimension.value}[/dim]" if t.dimension else ""
+            items.append(f"  [dim]·[/dim] {t.title}{dim}")
+
+        if items or week_offset == 0:
+            border = "cyan" if week_offset == 0 else "dim"
+            content = "\n".join(items) if items else "[dim]Nothing scheduled.[/dim]"
+            console.print(Panel(content, title=label, border_style=border, padding=(0, 2)))
+
+    # OKR progress at bottom
+    if current_okr_krs:
+        current_q = storage.get_current_quarter()
+        console.print(f"\n[bold]Active OKR key results — {current_q}[/bold]")
+        for o, kr in current_okr_krs[:6]:
+            console.print(f"  [dim]○[/dim] {kr.text} [dim]← {o.objective[:40]}[/dim]")
+    console.print()
+
+
+# ── find ────────────────────────────────────────────────────────────────────────
+
+def cmd_find(args: argparse.Namespace) -> None:
+    """Semantic search across tasks and journal entries using Claude."""
+    startup_check()
+    if not _check_api_key():
+        return
+
+    query = " ".join(getattr(args, "query", []) or [])
+    if not query:
+        query = Prompt.ask("Search for").strip()
+    if not query:
+        return
+
+    config = storage.load_config()
+    today = date.today().isoformat()
+
+    # Gather searchable content
+    tasks = storage.get_tasks(include_habits=False)
+    goals = storage.get_goals()
+    milestones = storage.get_milestones()
+    slow_burns = storage.get_slow_burns()
+
+    # Recent journal snippets
+    journals = storage.get_recent_journals(days=30)
+
+    # Build search corpus
+    corpus_parts = []
+
+    corpus_parts.append("=== TASKS ===")
+    for t in tasks:
+        status = t.status.value
+        dim = t.dimension.value if t.dimension else ""
+        notes = f" | {t.notes[:100]}" if t.notes else ""
+        corpus_parts.append(f"[task:{t.id}] {t.title} ({status}, {dim}){notes}")
+
+    corpus_parts.append("\n=== GOALS ===")
+    for g in goals:
+        corpus_parts.append(f"[goal:{g.id}] {g.title} ({g.dimension.value})")
+
+    corpus_parts.append("\n=== MILESTONES ===")
+    for m in milestones:
+        corpus_parts.append(f"[milestone:{m.id}] {m.title}")
+
+    corpus_parts.append("\n=== SLOW BURNS ===")
+    for s in slow_burns:
+        corpus_parts.append(f"[slow_burn:{s.id}] {s.title}")
+
+    if journals:
+        corpus_parts.append("\n=== RECENT JOURNAL EXCERPTS ===")
+        for d, content in journals[:7]:
+            snippet = content[:400].replace("\n", " ")
+            corpus_parts.append(f"[journal:{d}] {snippet}")
+
+    corpus = "\n".join(corpus_parts)
+
+    SEARCH_SYSTEM = """You are a semantic search assistant. Given a corpus of personal data and a query,
+find the most relevant items. Return results ranked by relevance.
+
+Return ONLY a JSON array (most relevant first, max 8 results):
+[
+  {
+    "type": "task" | "goal" | "milestone" | "slow_burn" | "journal",
+    "id": "the id or date",
+    "title": "the item title or journal date",
+    "relevance": "one sentence explaining why this matches the query",
+    "score": 1-10
+  }
+]"""
+
+    import anthropic as _ant
+    client = _ant.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY", ""))
+    with console.status(f"[dim]Searching for '{query}'...[/dim]"):
+        response = client.messages.create(
+            model="claude-sonnet-4-6",
+            max_tokens=1000,
+            system=SEARCH_SYSTEM,
+            messages=[{"role": "user", "content": f"Query: {query}\n\nCorpus:\n{corpus}"}],
+        )
+    text = response.content[0].text.strip()
+    if text.startswith("```"):
+        text = text.split("\n", 1)[1].rsplit("```", 1)[0].strip()
+
+    try:
+        results = json.loads(text)
+    except Exception:
+        console.print("[red]Search failed.[/red]")
+        return
+
+    if not results:
+        console.print(f"[dim]No results for '{query}'.[/dim]")
+        return
+
+    console.print(f"\n[bold]Results for:[/bold] {query}\n")
+    tbl = Table(box=box.SIMPLE, show_header=True, header_style="bold dim", padding=(0, 1))
+    tbl.add_column("Type", style="dim", width=10)
+    tbl.add_column("Title", min_width=30)
+    tbl.add_column("Why", style="dim")
+    for r in results:
+        type_style = {"task": "cyan", "goal": "green", "milestone": "yellow",
+                      "slow_burn": "blue", "journal": "magenta"}.get(r["type"], "white")
+        tbl.add_row(
+            f"[{type_style}]{r['type']}[/{type_style}]",
+            r.get("title", r.get("id", "")),
+            r.get("relevance", ""),
+        )
+    console.print(tbl)
+    console.print()
+
+
 # ── setup ──────────────────────────────────────────────────────────────────────
 
 def cmd_setup(args: argparse.Namespace) -> None:
@@ -2368,6 +2693,16 @@ def main() -> None:
     # decisions
     p_decisions = sub.add_parser("decisions", help="Browse past boardroom decisions")
 
+    # okrs
+    p_okrs = sub.add_parser("okrs", help="View OKRs by quarter")
+
+    # horizon
+    p_horizon = sub.add_parser("horizon", help="4-12 week forward view")
+
+    # find
+    p_find = sub.add_parser("find", help="Semantic search across tasks and journals")
+    p_find.add_argument("query", nargs="*", help="Search query")
+
     # setup
     p_setup = sub.add_parser("setup", help="First-run configuration")
 
@@ -2405,6 +2740,9 @@ def main() -> None:
         "review":      cmd_review,
         "goals":       cmd_goals,
         "research":    cmd_research,
+        "okrs":        cmd_okrs,
+        "horizon":     cmd_horizon,
+        "find":        cmd_find,
         "setup":       cmd_setup,
     }
     _dispatch[args.command](args)

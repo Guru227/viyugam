@@ -377,6 +377,63 @@ Write the weekly letter."""
     return response.content[0].text.strip()
 
 
+OKR_SYSTEM = """You are a strategic planning agent. Given a quarterly review and the user's goals,
+generate specific, measurable OKRs for the next quarter.
+
+Return ONLY a JSON array:
+[
+  {
+    "objective": "Clear, inspiring objective statement",
+    "dimension": "career" | "health" | "wealth" | "relationships" | "joy" | "learning",
+    "key_results": [
+      {"text": "Specific measurable outcome", "target": "metric or milestone"}
+    ]
+  }
+]
+
+Rules:
+- 2-4 objectives maximum. Quality over quantity.
+- 2-4 key results per objective.
+- Key results must be measurable or clearly completable.
+- Be realistic for a single quarter.
+- Align with the user's season focus if present."""
+
+
+def generate_okrs(
+    review_summary: str,
+    goals: list[dict],
+    current_quarter: str,
+    next_quarter: str,
+    season_focus: str = "",
+    constitution: str = "",
+) -> list[dict]:
+    client = _client()
+    content = f"""Current quarter: {current_quarter}
+Planning for: {next_quarter}
+Season focus: {season_focus or 'not set'}
+
+Review summary:
+{review_summary}
+
+Active goals:
+{json.dumps(goals, indent=2) if goals else "None set."}"""
+
+    system = OKR_SYSTEM
+    if constitution:
+        system += f"\n\nCONSTITUTION:\n{constitution}"
+
+    response = client.messages.create(
+        model="claude-sonnet-4-6",
+        max_tokens=1500,
+        system=system,
+        messages=[{"role": "user", "content": content}],
+    )
+    text = response.content[0].text.strip()
+    if text.startswith("```"):
+        text = text.split("\n", 1)[1].rsplit("```", 1)[0].strip()
+    return json.loads(text)
+
+
 def format_review_markdown(
     briefing: str,
     conversation: list[dict],

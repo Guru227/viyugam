@@ -17,6 +17,7 @@ from viyugam.models import (
     JournalSummary, SystemState, ViyugamConfig,
     TaskStatus, ResilienceState, CalendarEntry,
     SlowBurn, Milestone, Budget, Transaction, Decision, ActualRecord,
+    OKR, KeyResult,
 )
 
 
@@ -36,6 +37,9 @@ DECISIONS_FILE   = DATA / "decisions.json"
 ACTUALS_FILE     = DATA / "actuals.json"
 MEMORY_FILE      = HOME / "memory.json"
 CONSTITUTION_FILE= HOME / "constitution.md"
+ENERGY_CACHE_FILE= DATA / "energy_pattern.json"
+OKRS_FILE        = DATA / "okrs.json"
+JOURNALS_DIR     = JOURNALS
 
 
 def ensure_dirs() -> None:
@@ -51,7 +55,7 @@ def ensure_dirs() -> None:
     if not CALENDAR_FILE.exists():
         CALENDAR_FILE.write_text("[]")
     for fpath in (SLOW_BURNS_FILE, MILESTONES_FILE, BUDGETS_FILE,
-                  TRANSACTIONS_FILE, DECISIONS_FILE, ACTUALS_FILE):
+                  TRANSACTIONS_FILE, DECISIONS_FILE, ACTUALS_FILE, OKRS_FILE):
         if not fpath.exists():
             fpath.write_text("[]")
 
@@ -278,9 +282,12 @@ def get_recent_journals(days: int = 14) -> list[tuple[str, str]]:
     entries = []
     for i in range(days):
         d = (date.today() - timedelta(days=i)).isoformat()
-        content = load_journal(d)
-        if content:
-            entries.append((d, content))
+        path = JOURNALS_DIR / f"{d}.md"
+        if path.exists():
+            try:
+                entries.append((d, path.read_text()))
+            except Exception:
+                pass
     return entries
 
 
@@ -689,6 +696,36 @@ def save_constitution(content: str) -> None:
     CONSTITUTION_FILE.write_text(content)
 
 # ── Coherence Score ───────────────────────────────────────────────────────────
+
+def get_okrs(active_only: bool = True) -> list[OKR]:
+    raw = json.loads(OKRS_FILE.read_text()) if OKRS_FILE.exists() else []
+    okrs = [OKR(**o) for o in raw]
+    if active_only:
+        return [o for o in okrs if o.is_active]
+    return okrs
+
+def save_okr(okr: OKR) -> None:
+    raw = json.loads(OKRS_FILE.read_text()) if OKRS_FILE.exists() else []
+    raw = [o for o in raw if o["id"] != okr.id]
+    raw.append(okr.model_dump())
+    OKRS_FILE.write_text(json.dumps(raw, indent=2, ensure_ascii=False))
+
+def get_current_quarter() -> str:
+    today = date.today()
+    q = (today.month - 1) // 3 + 1
+    return f"{today.year}-Q{q}"
+
+def get_next_quarter() -> str:
+    today = date.today()
+    q = (today.month - 1) // 3 + 1
+    if q == 4:
+        return f"{today.year + 1}-Q1"
+    return f"{today.year}-Q{q + 1}"
+
+def get_energy_pattern() -> dict:
+    from viyugam.agents.energy import get_energy_pattern as _get
+    return _get(JOURNALS_DIR, ENERGY_CACHE_FILE)
+
 
 def compute_coherence_score(config: "ViyugamConfig", days: int = 7) -> dict:
     """
