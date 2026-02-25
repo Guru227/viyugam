@@ -46,6 +46,7 @@ VALID ACTIONS:
   run_find        — semantic search across tasks and journals
   show_calendar   — view calendar events
   show_constitution — view values document
+  show_dashboard  — open full-screen dashboard (daily / tactical / strategic)
   help            — explain what Viyugam can do
   unknown         — cannot classify; ask for clarification
 
@@ -68,7 +69,8 @@ ROUTING RULES (apply in order):
 16. "find X", "search for X", "look for X" in my data → run_find (query = X)
 17. "calendar", "events", "schedule view" → show_calendar
 18. "constitution", "values", "principles" → show_constitution
-19. "help", "what can you do", "commands", "features" → help
+19. "dashboard", "show dashboard", "open dashboard", "overview", "show overview" → show_dashboard
+20. "help", "what can you do", "commands", "features" → help
 20. Anything that looks like a task, journal entry, habit, note → log_content (text = full original)
 21. Compound inputs → multiple actions (e.g. "finished X, also spent Y on Z" → [mark_done, log_finance])
 
