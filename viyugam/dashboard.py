@@ -581,6 +581,25 @@ def _build_research(jobs: list) -> list[list]:
     return lines
 
 
+# ── ANSI sanitiser ─────────────────────────────────────────────────────────────
+
+import re as _re
+
+# Matches cursor-movement / screen-manipulation CSI sequences but NOT SGR (color)
+# codes (which end in 'm').  These must not be replayed inside the chat pane.
+_CURSOR_RE = _re.compile(
+    r'\x1b\[(?:\d+(?:;\d+)*)?[ABCDEFGHJKSTf]'   # cursor move / erase / position
+    r'|\x1b\[\?(?:25[lh]|2004[lh])'              # cursor show/hide, bracketed paste
+    r'|\x1b[78]'                                  # ESC 7/8 save/restore cursor
+    r'|\r(?!\n)'                                  # bare CR (not CRLF)
+)
+
+
+def _sanitize_ansi(text: str) -> str:
+    """Strip cursor-positioning codes; keep color/style SGR codes."""
+    return _CURSOR_RE.sub('', text)
+
+
 # ── Rich output capture ────────────────────────────────────────────────────────
 
 @contextlib.contextmanager
@@ -629,9 +648,9 @@ def _run_command_bg(
     try:
         with _capture_rich(width=chat_width) as buf:
             _ai_dispatch(text)
-        output = buf.getvalue()
+        output = _sanitize_ansi(buf.getvalue())
     except Exception as e:
-        output = f"[red]Error:[/red] {e}"
+        output = f"Error: {e}"
     finally:
         _repl_mod._tl.dashboard = False
 
@@ -666,9 +685,9 @@ def _run_plan_bg(state: _State, app: Application, chat_width: int) -> None:
         )
         with _capture_rich(width=chat_width) as buf:
             cmd_plan(ns)
-        output = buf.getvalue()
+        output = _sanitize_ansi(buf.getvalue())
     except Exception as e:
-        output = f"[red]Plan error:[/red] {e}"
+        output = f"Plan error: {e}"
 
     if state.chat and state.chat[-1].get("text") == "Planning your day…":
         state.chat.pop()
@@ -699,10 +718,9 @@ def _run_research_bg(
     try:
         with _capture_rich(width=80) as buf:
             cmd_research(argparse.Namespace(topic=topic.split()))
-        result = buf.getvalue()
-        # Strip ANSI for storage in result (keep plain text)
-        import re
-        plain = re.sub(r'\x1b\[[0-9;]*m', '', result)
+        result = _sanitize_ansi(buf.getvalue())
+        # Strip remaining ANSI color codes for plain-text storage in Research panel
+        plain = _re.sub(r'\x1b\[[0-9;]*m', '', result)
         job["status"]  = "done"
         job["result"]  = plain.strip()
     except Exception as e:
