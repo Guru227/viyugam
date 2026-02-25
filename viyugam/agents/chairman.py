@@ -71,7 +71,7 @@ def triage_inbox(items: list[str], config_context: str = "") -> list[dict]:
     client = _client()
     response = client.messages.create(
         model="claude-sonnet-4-6",
-        max_tokens=2048,
+        max_tokens=4096,
         system=TRIAGE_SYSTEM,
         messages=[{"role": "user", "content": user_content}],
     )
@@ -81,7 +81,34 @@ def triage_inbox(items: list[str], config_context: str = "") -> list[dict]:
     if text.startswith("```"):
         text = text.split("\n", 1)[1].rsplit("```", 1)[0].strip()
 
-    return json.loads(text)
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        # Response was truncated — attempt to recover partial valid JSON
+        # by closing the array at the last complete object boundary
+        last_close = text.rfind("}")
+        if last_close != -1:
+            truncated = text[:last_close + 1]
+            # Ensure it ends as a valid array
+            try:
+                return json.loads(truncated + "]")
+            except json.JSONDecodeError:
+                pass
+        # Nothing salvageable — return a single catch-all task
+        return [{
+            "original": items[0] if items else "",
+            "type": "task",
+            "title": (items[0] if items else "")[:80],
+            "dimension": None,
+            "energy_cost": 5,
+            "estimated_minutes": 30,
+            "context": None,
+            "notes": "Full text stored in inbox.",
+            "amount": None,
+            "category": None,
+            "description": None,
+            "tx_type": None,
+        }]
 
 
 # ── Daily Schedule ─────────────────────────────────────────────────────────────
