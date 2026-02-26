@@ -611,12 +611,16 @@ def _capture_rich(width: int = 60):
     buf = io.StringIO()
     cap = RichConsole(
         file=buf,
-        force_terminal=False,   # Don't pretend to be a terminal: prevents Rich's
-        color_system="truecolor",  # Live/Status from writing cursor codes live.
-        width=max(width, 40),      # Explicit color_system preserves color output.
+        force_terminal=False,    # Prevents Rich's Live/Status from writing cursor
+        color_system="truecolor", # codes live; explicit color_system keeps colours.
+        width=max(width, 40),
         highlight=False,
         soft_wrap=True,
     )
+    # Prevent Prompt.ask() / Confirm.ask() from blocking stdin in a background
+    # thread.  Returning "" causes Rich's Prompt to use its declared default.
+    cap.input = lambda prompt="": ""
+
     old = {}
     for mod in (_m, _r):
         if hasattr(mod, "console"):
@@ -663,7 +667,7 @@ def _run_command_bg(
         state.chat.append({"role": "assistant", "ansi": output})
     state.running = False
     # Auto-scroll chat to bottom
-    state.scroll_r = max(0, len(state.chat) * 4 - 20)
+    state.scroll_r = max(0, _count_chat_lines(state.chat) - 20)
     app.invalidate()
 
 
@@ -753,24 +757,50 @@ def _ticker_thread(state: _State, app: Application, stop: threading.Event) -> No
 
 # ── Chat rendering ─────────────────────────────────────────────────────────────
 
-def _render_chat(state: _State) -> list[tuple[str, str]]:
+def _chat_tokens(chat: list) -> list[tuple[str, str]]:
+    """Render all chat entries to a flat token list (no scrolling applied)."""
     out: list[tuple[str, str]] = []
-    visible = state.chat[max(0, state.scroll_r):]
-    for entry in visible:
+    for entry in chat:
         role = entry.get("role")
         if role == "user":
-            out.append(("class:chat.user",  f"  > {entry['text']}"))
+            out.append(("class:chat.user", f"  > {entry['text']}"))
             out.append(("", "\n"))
         elif role == "assistant":
             ansi_str = entry.get("ansi", "")
             if ansi_str:
-                parsed = ANSI(ansi_str).__pt_formatted_text__()
-                out.extend(parsed)
+                out.extend(ANSI(ansi_str).__pt_formatted_text__())
             out.append(("", "\n"))
         elif role == "system":
             out.append(("class:chat.system", f"  {entry['text']}"))
             out.append(("", "\n"))
     return out
+
+
+def _count_chat_lines(chat: list) -> int:
+    """Count the number of rendered lines in the chat (approx)."""
+    total = 0
+    for entry in chat:
+        role = entry.get("role")
+        if role == "assistant":
+            total += entry.get("ansi", "").count("\n") + 1
+        else:
+            total += 1
+    return max(0, total)
+
+
+def _render_chat(state: _State) -> list[tuple[str, str]]:
+    """Return tokens for the chat pane, skipping the first scroll_r lines."""
+    tokens = _chat_tokens(state.chat)
+    if state.scroll_r <= 0:
+        return tokens
+    # Skip exactly scroll_r newline tokens
+    skipped = 0
+    for i, (style, text) in enumerate(tokens):
+        if style == "" and text == "\n":
+            skipped += 1
+            if skipped >= state.scroll_r:
+                return tokens[i + 1:]
+    return []
 
 
 # ── Panel content renderer ────────────────────────────────────────────────────
@@ -905,11 +935,12 @@ def run_dashboard() -> None:
 
     @kb.add("c-up")
     def _scroll_chat_up(event):
-        state.scroll_r = max(0, state.scroll_r - 1)
+        state.scroll_r = max(0, state.scroll_r - 3)
 
     @kb.add("c-down")
     def _scroll_chat_down(event):
-        state.scroll_r = min(max(0, len(state.chat) - 1), state.scroll_r + 1)
+        total = _count_chat_lines(state.chat)
+        state.scroll_r = min(max(0, total - 5), state.scroll_r + 3)
 
     @kb.add("f", filter=is_normal)
     def _toggle_focus(event):
@@ -945,7 +976,7 @@ def run_dashboard() -> None:
         input_buffer.reset()
         state.mode = "normal"
         state.chat.append({"role": "user", "text": text})
-        state.scroll_r = max(0, len(state.chat) * 4 - 20)
+        state.scroll_r = max(0, _count_chat_lines(state.chat) - 20)
 
         # ── Special: approve staged plan ──
         if state.staging and text.lower() in APPROVE_KW:
