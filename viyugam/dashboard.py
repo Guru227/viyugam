@@ -967,7 +967,8 @@ def _run_research_bg(
 
 # ── Ticker thread (elapsed time + spinner) ────────────────────────────────────
 
-def _ticker_thread(state: _State, app: Application, stop: threading.Event) -> None:
+def _ticker_thread(state: _State, app: Application, stop: threading.Event,
+                   request_build_fn=None) -> None:
     _reentry_checked = False
     while not stop.is_set():
         time.sleep(1)
@@ -977,7 +978,7 @@ def _ticker_thread(state: _State, app: Application, stop: threading.Event) -> No
                 job["elapsed"] = job.get("elapsed", 0) + 1
                 job["tick"]    = state.tick
 
-        # Re-entry detection (check once per session, on first tick)
+        # Re-entry detection (check once per session, on tick 2)
         if not _reentry_checked and state.tick == 2:
             _reentry_checked = True
             try:
@@ -995,6 +996,11 @@ def _ticker_thread(state: _State, app: Application, stop: threading.Event) -> No
                         state.scroll_r = max(0, _count_chat_lines(state.chat) - 20)
             except Exception:
                 pass
+
+        # Pre-build all panels in the background so switching is instant
+        if request_build_fn is not None:
+            for p in range(3):  # Strategic, Tactical, Daily
+                request_build_fn(p, state.focus_mode, state.staging)
 
         app.invalidate()
 
@@ -1067,25 +1073,75 @@ def run_dashboard() -> None:
     state     = _State()
     stop_tick = threading.Event()
 
-    # ── Lazy panel cache (rebuilt on invalidate) ──
-    _cache: dict[str, list] = {}
+    # ── Async panel cache ──────────────────────────────────────────────────────
+    # _panel_lines() ONLY reads from cache — never does disk I/O on the UI thread.
+    # Background threads build panels and call app.invalidate() when ready.
+    _cache:    dict[str, list[list]] = {}
+    _building: set[str]              = set()
+    _app_ref:  list                  = [None]   # set after app creation
+    # Refresh period: rebuild the panel every N ticks (1 tick = 1 s)
+    _REFRESH_TICKS = 30
+
+    def _do_build(key: str, panel: int, focus: str, staging_flag: bool) -> None:
+        """Build one panel in a background thread, then invalidate the app."""
+        try:
+            if panel == 0:
+                result = _build_strategic(focus)
+            elif panel == 1:
+                result = _build_tactical(focus)
+            elif panel == 2:
+                result = _build_daily(focus, staging_flag)
+            else:
+                result = _build_research(state.research)
+            _cache[key] = result
+        except Exception as exc:
+            _cache[key] = [[_t("overdue", f"  Error: {exc}")]]
+        finally:
+            _building.discard(key)
+        if _app_ref[0] is not None:
+            _app_ref[0].invalidate()
+
+    def _request_build(panel: int, focus: str, staging_flag: bool) -> None:
+        """Trigger a background build unless one is already in flight."""
+        bucket = state.tick // _REFRESH_TICKS
+        key = f"{panel}:{focus}:{staging_flag}:{bucket}"
+        if key not in _cache and key not in _building:
+            _building.add(key)
+            threading.Thread(
+                target=_do_build,
+                args=(key, panel, focus, staging_flag),
+                daemon=True,
+            ).start()
 
     def _panel_lines() -> list[list]:
-        if state.dirty:
-            _cache.clear()
-            state.dirty = False
-        key = f"{state.panel}:{state.focus_mode}:{state.staging}:{state.tick // 5}"
-        if key not in _cache:
-            _cache.clear()
-            if state.panel == 0:
-                _cache[key] = _build_strategic(state.focus_mode)
-            elif state.panel == 1:
-                _cache[key] = _build_tactical(state.focus_mode)
-            elif state.panel == 2:
-                _cache[key] = _build_daily(state.focus_mode, state.staging)
-            else:
-                _cache[key] = _build_research(state.research)
-        return _cache[key]
+        """Return cached panel content — never blocks, never does I/O."""
+        panel = state.panel
+        focus = state.focus_mode
+        staging_flag = state.staging
+        bucket = state.tick // _REFRESH_TICKS
+        key = f"{panel}:{focus}:{staging_flag}:{bucket}"
+
+        # Return current-bucket result if ready
+        if key in _cache:
+            return _cache[key]
+
+        # Trigger a (re)build for the current bucket
+        if key not in _building:
+            _building.add(key)
+            threading.Thread(
+                target=_do_build,
+                args=(key, panel, focus, staging_flag),
+                daemon=True,
+            ).start()
+
+        # While waiting, return the most recent cached result for this panel/focus
+        prefix = f"{panel}:{focus}:{staging_flag}:"
+        for k in sorted(_cache, reverse=True):
+            if k.startswith(prefix):
+                return _cache[k]
+
+        # No cache at all yet: show placeholder
+        return [[_t("dim", "  Loading...")]]
 
     input_buffer = Buffer(
         name="dash_input",
@@ -1214,7 +1270,10 @@ def run_dashboard() -> None:
         except ValueError:
             idx = 0
         state.focus_mode = FOCUS_CYCLE[(idx + 1) % len(FOCUS_CYCLE)]
-        _cache.clear()
+        # Evict all cached panels so they rebuild with the new focus
+        for k in list(_cache.keys()):
+            del _cache[k]
+        _building.clear()
 
     # ── Paste from clipboard (Ctrl+V) ──
     def _do_paste():
@@ -1375,11 +1434,15 @@ def run_dashboard() -> None:
         full_screen=True,
         mouse_support=False,
     )
+    _app_ref[0] = app  # allow background builds to invalidate
+
+    # Kick off initial build for the first panel before the ticker starts
+    _request_build(state.panel, state.focus_mode, state.staging)
 
     # Start ticker thread
     ticker = threading.Thread(
         target=_ticker_thread,
-        args=(state, app, stop_tick),
+        args=(state, app, stop_tick, _request_build),
         daemon=True,
     )
     ticker.start()
