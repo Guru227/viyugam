@@ -316,6 +316,37 @@ def _build_strategic(focus: str) -> list[list]:
             L(_t("dim", "    None — add long-horizon aspirations"))
         B()
 
+        # ── Monthly finance summary ──
+        try:
+            month_str = date.today().strftime("%Y-%m")
+            cf = storage.get_monthly_cashflow(month_str)
+            if cf.get("income") or cf.get("expenses"):
+                L(_t("label", f"  FINANCE  ({month_str})"))
+                if cf["income"]:
+                    L(_t("done", f"  Income:   ₹{cf['income']:>10,.0f}"))
+                L(_t("dim",     f"  Expenses: ₹{cf['expenses']:>10,.0f}"))
+                net_sty = "done" if cf["net"] >= 0 else "overdue"
+                L(_t(net_sty,   f"  Net:      ₹{cf['net']:>10,.0f}"))
+                top_cats = sorted(cf.get("by_category", {}).items(), key=lambda x: -x[1])[:3]
+                for cat, amt in top_cats:
+                    L(_t("dim", f"    {cat:<16}  ₹{amt:>8,.0f}"))
+                B()
+        except Exception:
+            pass
+
+        # ── Upcoming quarter calendar events ──
+        try:
+            q_end = storage.period_end("quarterly", date.today())
+            cal_events = storage.get_ics_events_for_period(date.today(), q_end)
+            if cal_events:
+                L(_t("label", f"  CALENDAR  (to {q_end.isoformat()})"))
+                for ev in cal_events[:6]:
+                    time_str = f"  {ev['start_time']}" if ev.get("start_time") else ""
+                    L(_t("dim", f"  {ev['date']}  {ev['title'][:32]}{time_str}"))
+                B()
+        except Exception:
+            pass
+
         # ── Review cadence ──
         L(_t("dim", f"  Last review:   {state.last_review or 'never'}"))
 
@@ -452,6 +483,34 @@ def _build_tactical(focus: str) -> list[list]:
         except Exception:
             pass
 
+        # ── Finance: month cashflow ──
+        try:
+            month_str = date.today().strftime("%Y-%m")
+            cf = storage.get_monthly_cashflow(month_str)
+            if cf.get("income") or cf.get("expenses"):
+                L(_t("label", f"  FINANCE  ({month_str})"))
+                if cf["income"]:
+                    L(_t("done", f"  ↑ Income   ₹{cf['income']:>10,.0f}"))
+                L(_t("dim",     f"  ↓ Expenses ₹{cf['expenses']:>10,.0f}"))
+                net_sty = "done" if cf["net"] >= 0 else "overdue"
+                L(_t(net_sty,   f"  = Net      ₹{cf['net']:>10,.0f}"))
+                B()
+        except Exception:
+            pass
+
+        # ── Calendar: next 14 days ──
+        try:
+            cal_end = date.today() + timedelta(days=14)
+            cal_events = storage.get_ics_events_for_period(date.today(), cal_end)
+            if cal_events:
+                L(_t("label", "  CALENDAR  (next 14 days)"))
+                for ev in cal_events[:8]:
+                    time_str = f"  {ev['start_time']}" if ev.get("start_time") else ""
+                    L(_t("dim", f"  {ev['date']}  {ev['title'][:28]}{time_str}"))
+                B()
+        except Exception:
+            pass
+
         L(_t("dim", f"  Last weekly review:  {state.last_review or 'never'}"))
 
     except Exception as e:
@@ -555,6 +614,33 @@ def _build_daily(focus: str, staging: bool) -> list[list]:
                 L(_t(sty, f"  {mark}  {h.title[:32]:<32}"),
                   _t("dim", f"  streak {h.streak}"))
             B()
+
+        # ── Today's calendar events ──
+        try:
+            today_date = date.today()
+            day_events = storage.get_ics_events_for_period(today_date, today_date + timedelta(days=1))
+            if day_events:
+                L(_t("label", "  CALENDAR"))
+                for ev in day_events[:5]:
+                    time_str = ev.get("start_time") or "all day"
+                    L(_t("dim", f"  {time_str}  {ev['title'][:36]}"))
+                B()
+        except Exception:
+            pass
+
+        # ── Today's transactions ──
+        try:
+            today_str = date.today().isoformat()
+            week_start = storage.period_start("weekly", date.today()).isoformat()
+            week_txns = storage.get_transactions_by_period(week_start, today_str)
+            if week_txns:
+                L(_t("label", "  SPEND  (this week)"))
+                for txn in sorted(week_txns, key=lambda x: x.occurred_at, reverse=True)[:4]:
+                    amt = f"₹{txn.amount:,.0f}"
+                    L(_t("dim", f"  {txn.occurred_at[:10]}  {txn.description[:24]:<24}  {amt:>9}"))
+                B()
+        except Exception:
+            pass
 
         # ── Overdue ──
         vis_overdue = [t for t in overdue if _visible(t.dimension, focus)]
@@ -1122,6 +1208,35 @@ def run_dashboard() -> None:
     def _toggle_focus(event):
         state.focus_mode = "work" if state.focus_mode == "all" else "all"
         _cache.clear()
+
+    # ── Paste from clipboard (Ctrl+V) ──
+    def _do_paste():
+        import subprocess
+        for cmd in (
+            ["wl-paste", "--no-newline"],
+            ["xclip", "-selection", "clipboard", "-o"],
+            ["xsel", "--clipboard", "--output"],
+        ):
+            try:
+                r = subprocess.run(cmd, capture_output=True, text=True, timeout=2)
+                if r.returncode == 0 and r.stdout:
+                    return r.stdout
+            except (FileNotFoundError, subprocess.TimeoutExpired):
+                continue
+        return None
+
+    @kb.add("c-v", filter=is_normal)
+    def _paste_normal(event):
+        state.mode = "insert"
+        text = _do_paste()
+        if text:
+            input_buffer.insert_text(text)
+
+    @kb.add("c-v", filter=is_insert)
+    def _paste_insert(event):
+        text = _do_paste()
+        if text:
+            input_buffer.insert_text(text)
 
     # ── Normal mode: enter insert ──
     @kb.add("i", filter=is_normal)
