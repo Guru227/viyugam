@@ -41,9 +41,10 @@ import viyugam.storage as storage
 
 # ── Constants ──────────────────────────────────────────────────────────────────
 
-PANELS      = ["Strategic", "Tactical", "Daily", "Research"]
-WORK_DIMS   = {"career", "learning", "wealth"}
-APPROVE_KW  = {"approve", "looks good", "lgtm", "confirmed", "yes", "ok", "okay", "ship it"}
+PANELS       = ["Strategic", "Tactical", "Daily", "Research"]
+WORK_DIMS    = {"career", "learning", "wealth"}
+APPROVE_KW   = {"approve", "looks good", "lgtm", "confirmed", "yes", "ok", "okay", "ship it"}
+FOCUS_CYCLE  = ["all", "career", "wealth", "health", "relationships", "joy", "learning"]
 
 # ── Style ──────────────────────────────────────────────────────────────────────
 
@@ -142,7 +143,9 @@ def _visible(dimension, focus_mode: str) -> bool:
     if focus_mode == "all" or dimension is None:
         return True
     d = dimension.value if hasattr(dimension, "value") else str(dimension)
-    return d in WORK_DIMS
+    if focus_mode == "work":
+        return d in WORK_DIMS
+    return d == focus_mode
 
 
 # ── Project completion ─────────────────────────────────────────────────────────
@@ -210,7 +213,7 @@ def _build_strategic(focus: str) -> list[list]:
         if prayer:
             for line in prayer.strip().splitlines()[:4]:
                 if line.strip():
-                    L(_t("accent", f"  {line[:48]}"))
+                    L(_t("accent", f"  {line}"))
             lines.append(_div())
             B()
 
@@ -1091,8 +1094,8 @@ def run_dashboard() -> None:
 
     # ── Header ──
     def _header_tokens() -> list:
-        mode_sty  = "header.mode.work" if state.focus_mode == "work" else "header.mode.all"
-        mode_str  = " WORK " if state.focus_mode == "work" else " ALL "
+        mode_sty  = "header.mode.work" if state.focus_mode != "all" else "header.mode.all"
+        mode_str  = f" {state.focus_mode.upper()} "
         spinner   = "⟳ " if state.running else ""
         return [
             ("class:header.title", "  Viyugam  "),
@@ -1152,7 +1155,7 @@ def run_dashboard() -> None:
         return [
             ("class:toolbar", "  "),
             ("class:mode.normal", "NORMAL"),
-            ("class:toolbar", f"   ← → panels   ↑ ↓ scroll [{pane_label}]   Tab switch pane   f focus   i type   Esc exit  "),
+            ("class:toolbar", f"   ← → panels   ↑ ↓ scroll [{pane_label}]   Tab switch pane   f dimension   i type   Esc exit  "),
         ]
 
     def _prompt_prefix(*_) -> FormattedText:
@@ -1206,7 +1209,11 @@ def run_dashboard() -> None:
 
     @kb.add("f", filter=is_normal)
     def _toggle_focus(event):
-        state.focus_mode = "work" if state.focus_mode == "all" else "all"
+        try:
+            idx = FOCUS_CYCLE.index(state.focus_mode)
+        except ValueError:
+            idx = 0
+        state.focus_mode = FOCUS_CYCLE[(idx + 1) % len(FOCUS_CYCLE)]
         _cache.clear()
 
     # ── Paste from clipboard (Ctrl+V) ──
