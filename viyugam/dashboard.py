@@ -120,12 +120,14 @@ _WELCOME_HINTS = """\
 
 @dataclass
 class _State:
-    panel:       int        = 2          # 0=strategic 1=tactical 2=daily 3=research
-    scroll_l:    list       = field(default_factory=lambda: [0, 0, 0, 0])
-    scroll_r:    int        = 0
-    focus_mode:  str        = "all"      # "all" | "work"
-    staging:     bool       = False      # plan staged, awaiting approval
-    mode:        str        = "normal"   # "normal" | "insert"
+    panel:        int        = 2          # 0=strategic 1=tactical 2=daily 3=research
+    scroll_l:     list       = field(default_factory=lambda: [0, 0, 0, 0])
+    scroll_r:     int        = 0
+    focus_mode:   str        = "all"      # "all" | "work"
+    staging:      bool       = False      # plan staged, awaiting approval
+    mode:         str        = "normal"   # "normal" | "insert"
+    scroll_focus: str        = "left"     # "left" | "right" — which pane ↑↓ scrolls
+    dirty:        bool       = False      # cleared panel cache when True
     chat:        list       = field(default_factory=lambda: [
         {"role": "assistant", "ansi": _WELCOME_HINTS},
     ])
@@ -252,7 +254,7 @@ def _build_strategic(focus: str) -> list[list]:
                           and _visible(g.dimension, focus)]
         L(_t("label", f"  GOALS  ({len(active_goals)} active)"))
         if active_goals:
-            for g in active_goals[:6]:
+            for g in active_goals[:10]:
                 dim = g.dimension.value if g.dimension else "—"
                 L(_t("todo", f"  ◆  {g.title[:36]:<36}  "),
                   _t("dim",  dim))
@@ -666,7 +668,7 @@ def _run_command_bg(
     if output.strip():
         state.chat.append({"role": "assistant", "ansi": output})
     state.running = False
-    # Auto-scroll chat to bottom
+    state.dirty   = True   # force panel cache refresh
     state.scroll_r = max(0, _count_chat_lines(state.chat) - 20)
     app.invalidate()
 
@@ -702,11 +704,13 @@ def _run_plan_bg(state: _State, app: Application, chat_width: int) -> None:
 
     state.staging = True
     state.panel   = 2  # switch to Daily panel
+    state.dirty   = True
     state.chat.append({
         "role": "system",
         "text": "Plan staged in Daily panel. Type 'approve' to confirm.",
     })
     state.running = False
+    state.scroll_r = max(0, _count_chat_lines(state.chat) - 20)
     app.invalidate()
 
 
@@ -827,6 +831,9 @@ def run_dashboard() -> None:
     _cache: dict[str, list] = {}
 
     def _panel_lines() -> list[list]:
+        if state.dirty:
+            _cache.clear()
+            state.dirty = False
         key = f"{state.panel}:{state.focus_mode}:{state.staging}:{state.tick // 5}"
         if key not in _cache:
             _cache.clear()
@@ -868,16 +875,22 @@ def run_dashboard() -> None:
             out.append((f"class:{sty}", f" {name} "))
             if i < len(PANELS) - 1:
                 out.append(("class:tab.sep", " │ "))
-        out.append(("class:tab", "  "))
+        # Show scroll-active indicator on the left tab bar
+        if state.scroll_focus == "left":
+            out.append(("class:tab.active", " ↑↓ "))
+        else:
+            out.append(("class:tab", "     "))
         return out
 
     # ── Chat header (right panel) ──
     def _chat_header_tokens() -> list:
         mode_sty = "class:mode.insert" if state.mode == "insert" else "class:mode.normal"
         mode_str = " INSERT " if state.mode == "insert" else " NORMAL "
+        scroll_sty = "class:tab.active" if state.scroll_focus == "right" else "class:dim"
         return [
             ("class:chat.header", "  Chat  "),
             (mode_sty,            mode_str),
+            (scroll_sty,          " ↑↓ " if state.scroll_focus == "right" else "    "),
         ]
 
     # ── Content controls ──
@@ -898,10 +911,11 @@ def run_dashboard() -> None:
                 ("class:toolbar.insert", "INSERT"),
                 ("class:toolbar",        "   Enter submit   Esc normal mode  "),
             ]
+        pane_label = "chat" if state.scroll_focus == "right" else "panel"
         return [
             ("class:toolbar", "  "),
             ("class:mode.normal", "NORMAL"),
-            ("class:toolbar", "   ← → panels   ↑ ↓ scroll   f work/all   i type   Esc exit  "),
+            ("class:toolbar", f"   ← → panels   ↑ ↓ scroll [{pane_label}]   Tab switch pane   f focus   i type   Esc exit  "),
         ]
 
     def _prompt_prefix(*_) -> FormattedText:
@@ -926,12 +940,23 @@ def run_dashboard() -> None:
 
     @kb.add("up", eager=True, filter=is_normal)
     def _up(event):
-        state.scroll_l[state.panel] = max(0, state.scroll_l[state.panel] - 1)
+        if state.scroll_focus == "right":
+            state.scroll_r = max(0, state.scroll_r - 3)
+        else:
+            state.scroll_l[state.panel] = max(0, state.scroll_l[state.panel] - 1)
 
     @kb.add("down", eager=True, filter=is_normal)
     def _down(event):
-        mx = max(0, len(_panel_lines()) - 5)
-        state.scroll_l[state.panel] = min(mx, state.scroll_l[state.panel] + 1)
+        if state.scroll_focus == "right":
+            total = _count_chat_lines(state.chat)
+            state.scroll_r = min(max(0, total - 5), state.scroll_r + 3)
+        else:
+            mx = max(0, len(_panel_lines()) - 5)
+            state.scroll_l[state.panel] = min(mx, state.scroll_l[state.panel] + 1)
+
+    @kb.add("tab", filter=is_normal)
+    def _toggle_pane(event):
+        state.scroll_focus = "right" if state.scroll_focus == "left" else "left"
 
     @kb.add("c-up")
     def _scroll_chat_up(event):
