@@ -611,8 +611,9 @@ def _capture_rich(width: int = 60):
     buf = io.StringIO()
     cap = RichConsole(
         file=buf,
-        force_terminal=True,
-        width=max(width, 40),
+        force_terminal=False,   # Don't pretend to be a terminal: prevents Rich's
+        color_system="truecolor",  # Live/Status from writing cursor codes live.
+        width=max(width, 40),      # Explicit color_system preserves color output.
         highlight=False,
         soft_wrap=True,
     )
