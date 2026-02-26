@@ -132,9 +132,10 @@ class _State:
     chat:        list       = field(default_factory=lambda: [
         {"role": "assistant", "ansi": _WELCOME_HINTS},
     ])
-    research:    list       = field(default_factory=list)
-    running:     bool       = False
-    tick:        int        = 0          # incremented by ticker thread
+    research:       list       = field(default_factory=list)
+    running:        bool       = False
+    tick:           int        = 0          # incremented by ticker thread
+    active_session: Optional[dict] = None  # review / plan session in progress
 
 
 # ── Focus filter ───────────────────────────────────────────────────────────────
@@ -965,6 +966,291 @@ def _run_research_bg(
     app.invalidate()
 
 
+# ── Session management (multi-turn review / plan inside dashboard) ────────────
+
+_REVIEW_DIMS = ["career", "wealth", "health", "relationships", "joy", "learning"]
+
+
+def _session_chat(role: str, text: str, state: "_State", app: Application) -> None:
+    state.chat.append({"role": role, "text": text})
+    state.scroll_r = max(0, _count_chat_lines(state.chat) - 20)
+    app.invalidate()
+
+
+def _start_review_session(cadence: str, state: "_State", app: Application) -> None:
+    """Build context, run first retro turn, set active_session. Runs in bg thread."""
+    state.running = True
+    app.invalidate()
+    try:
+        from viyugam.agents import reviewer as rev
+        today = date.today()
+        try:
+            pstart = storage.period_start(cadence, today)
+            tasks  = storage.get_tasks(include_habits=False)
+            goals  = storage.get_goals()
+            plan   = storage.load_plan(cadence)
+            done   = [t.title for t in tasks
+                      if getattr(t, "status", None) and "done" in str(t.status).lower()]
+            review_data = {
+                "period_start": pstart.isoformat(),
+                "period_end":   today.isoformat(),
+                "prior_plan":   plan,
+                "completed_tasks": done[:10],
+                "goals": [g.title for g in goals[:10]],
+            }
+        except Exception:
+            review_data = {}
+
+        opening_ctx = (
+            f"Starting {cadence} review. "
+            f"Period: {review_data.get('period_start','?')} – {review_data.get('period_end','?')}. "
+            f"Goals: {', '.join(review_data.get('goals',[])[:3]) or 'none set'}. "
+            f"Completed this period: {', '.join(review_data.get('completed_tasks',[])[:3]) or 'none logged'}."
+        )
+        history = []
+        opening, _ = rev.retro_turn(history, opening_ctx, cadence, review_data)
+        history.append({"role": "assistant", "content": opening})
+
+        state.active_session = {
+            "type":        "review",
+            "phase":       "retro",
+            "cadence":     cadence,
+            "today":       today.isoformat(),
+            "retro_history": history,
+            "review_data": review_data,
+            "dim_idx":     0,
+            "dim_history": [],
+        }
+        _session_chat("assistant", opening, state, app)
+        _session_chat("system",
+            "Type your reflections. 'next' to advance, 'quit' to end.", state, app)
+    except Exception as exc:
+        state.active_session = None
+        _session_chat("system", f"Could not start review: {exc}", state, app)
+    finally:
+        state.running = False
+        app.invalidate()
+
+
+def _start_plan_session(scope: str, state: "_State", app: Application) -> None:
+    """Generate initial plan proposal, set active_session. Runs in bg thread."""
+    state.running = True
+    app.invalidate()
+    try:
+        from viyugam.agents.chairman import generate_initial_plan_proposal
+        today  = date.today()
+        pstart = storage.period_start(scope, today)
+        pend   = storage.period_end(scope, today)
+        tasks  = [t.model_dump() for t in storage.get_tasks(include_habits=False)[:20]]
+        goals  = [g.model_dump() for g in storage.get_goals()[:10]]
+        parent_scope = {"daily": "weekly", "weekly": "monthly",
+                        "monthly": "quarterly"}.get(scope, "")
+        parent_plan  = storage.load_plan(parent_scope) if parent_scope else {}
+        values        = storage.load_values()
+        budget        = storage.get_budget_envelope_summary()
+
+        result   = generate_initial_plan_proposal(
+            scope=scope, tasks=tasks, goals=goals,
+            parent_plan=parent_plan, values=values,
+            budget_envelopes=budget,
+            period_start=pstart.isoformat(), period_end=pend.isoformat(),
+        )
+        proposal = result.get("proposal") or result.get("raw", "")
+        opening  = result.get("vision") or proposal[:400]
+        history  = [{"role": "assistant", "content": opening}]
+
+        state.active_session = {
+            "type":             "plan",
+            "scope":            scope,
+            "today":            today.isoformat(),
+            "plan_history":     history,
+            "current_proposal": proposal,
+        }
+        _session_chat("assistant", opening or "Here is the proposed plan.", state, app)
+        if proposal and proposal != opening:
+            _session_chat("system", proposal[:600], state, app)
+        _session_chat("system",
+            "Discuss the plan. Say 'approve' or 'save' to finalise.", state, app)
+    except Exception as exc:
+        state.active_session = None
+        _session_chat("system", f"Could not start plan: {exc}", state, app)
+    finally:
+        state.running = False
+        app.invalidate()
+
+
+def _continue_session(text: str, state: "_State", app: Application) -> None:
+    """Route a user message into the active session. Runs in bg thread."""
+    session = state.active_session
+    if not session:
+        return
+    state.running = True
+    app.invalidate()
+    tl = text.lower().strip()
+    try:
+        if tl in ("quit", "exit", "q"):
+            state.active_session = None
+            state.dirty = True
+            _session_chat("system", "Session ended.", state, app)
+            return
+        stype = session["type"]
+        if stype == "review":
+            _review_turn(text, tl, session, state, app)
+        elif stype == "plan":
+            _plan_turn(text, tl, session, state, app)
+        else:
+            state.active_session = None
+    except Exception as exc:
+        _session_chat("system", f"Error: {exc}", state, app)
+    finally:
+        state.running = False
+        app.invalidate()
+
+
+def _review_turn(text: str, tl: str, session: dict, state: "_State",
+                 app: Application) -> None:
+    from viyugam.agents import reviewer as rev
+    phase   = session["phase"]
+    cadence = session["cadence"]
+    today   = session["today"]
+
+    if phase == "retro":
+        history = session["retro_history"]
+        history.append({"role": "user", "content": text})
+        response, done = rev.retro_turn(history, text, cadence, session.get("review_data", {}))
+        history.append({"role": "assistant", "content": response})
+        if tl == "next" or done:
+            _session_chat("system",
+                "Moving to journals — 6 dimensions. 'next' writes & continues, 'skip' skips.",
+                state, app)
+            session["phase"]       = "journal"
+            session["dim_idx"]     = 0
+            session["dim_history"] = []
+            _journal_open_dim(session, state, app)
+        else:
+            _session_chat("assistant", response, state, app)
+
+    elif phase == "journal":
+        dims    = _REVIEW_DIMS
+        idx     = session.get("dim_idx", 0)
+        if idx >= len(dims):
+            _review_finish_journals(session, state, app)
+            return
+        dim = dims[idx]
+
+        if tl in ("next", "skip"):
+            if tl == "skip":
+                content = "skipped"
+            else:
+                try:
+                    content = rev.synthesize_dim_journal(
+                        session.get("dim_history", []), dim, cadence, today)
+                except Exception:
+                    content = " ".join(
+                        m["content"] for m in session.get("dim_history", [])
+                        if m.get("role") == "user") or "no notes"
+            try:
+                jp = storage.JOURNAL / f"{today}-{cadence}-{dim}.md"
+                jp.parent.mkdir(parents=True, exist_ok=True)
+                jp.write_text(f"# {dim} — {today}\n\n{content}\n")
+            except Exception:
+                pass
+            _session_chat("system", f"✓ {dim} saved.", state, app)
+            session["dim_idx"]     = idx + 1
+            session["dim_history"] = []
+            if session["dim_idx"] >= len(dims):
+                _review_finish_journals(session, state, app)
+            else:
+                _journal_open_dim(session, state, app)
+        else:
+            dim_history = session.get("dim_history", [])
+            dim_history.append({"role": "user", "content": text})
+            response, done = rev.dim_journal_turn(dim_history, text, dim, cadence)
+            dim_history.append({"role": "assistant", "content": response})
+            session["dim_history"] = dim_history
+            _session_chat("assistant", response, state, app)
+            if done:
+                _review_turn("next", "next", session, state, app)
+
+    elif phase == "plan":
+        _plan_turn(text, tl, session, state, app)
+
+
+def _journal_open_dim(session: dict, state: "_State", app: Application) -> None:
+    from viyugam.agents import reviewer as rev
+    dim     = _REVIEW_DIMS[session["dim_idx"]]
+    cadence = session["cadence"]
+    try:
+        opening, _ = rev.dim_journal_turn([], "start", dim, cadence)
+    except Exception:
+        opening = f"Let's reflect on your {dim} dimension. What stands out this {cadence}?"
+    session["dim_history"] = [{"role": "assistant", "content": opening}]
+    _session_chat("assistant", f"[{dim.upper()}]\n\n{opening}", state, app)
+
+
+def _review_finish_journals(session: dict, state: "_State", app: Application) -> None:
+    cadence = session["cadence"]
+    _session_chat("system", "All journals written. Generating plan proposal…", state, app)
+    session["phase"]            = "plan"
+    session["plan_history"]     = []
+    session["current_proposal"] = ""
+    try:
+        from viyugam.agents.chairman import generate_initial_plan_proposal
+        today_d = date.fromisoformat(session["today"])
+        pstart  = storage.period_start(cadence, today_d)
+        pend    = storage.period_end(cadence, today_d)
+        tasks   = [t.model_dump() for t in storage.get_tasks(include_habits=False)[:20]]
+        goals   = [g.model_dump() for g in storage.get_goals()[:10]]
+        values  = storage.load_values()
+        result  = generate_initial_plan_proposal(
+            scope=cadence, tasks=tasks, goals=goals,
+            parent_plan={}, values=values, budget_envelopes=[],
+            period_start=pstart.isoformat(), period_end=pend.isoformat(),
+        )
+        proposal = result.get("proposal") or result.get("raw", "")
+        session["current_proposal"] = proposal
+        if proposal:
+            _session_chat("assistant", proposal[:700], state, app)
+    except Exception as exc:
+        _session_chat("system", f"Could not generate plan: {exc}", state, app)
+    _session_chat("system", "Discuss or say 'approve' to save and finish.", state, app)
+
+
+def _plan_turn(text: str, tl: str, session: dict, state: "_State",
+               app: Application) -> None:
+    from viyugam.agents.chairman import directive_boardroom_turn
+    scope = session.get("scope") or session.get("cadence", "weekly")
+
+    if tl in APPROVE_KW or tl in ("save", "done"):
+        try:
+            storage.save_plan(scope, {
+                "proposal": session.get("current_proposal", ""),
+                "date":     session.get("today"),
+                "cadence":  scope,
+            })
+            state.dirty = True
+        except Exception:
+            pass
+        state.active_session = None
+        _session_chat("system", f"Plan saved. Good luck this {scope}!", state, app)
+        return
+
+    history = session.get("plan_history", [])
+    history.append({"role": "user", "content": text})
+    result   = directive_boardroom_turn(
+        scope=scope, context="", user_message=text,
+        history=history, current_proposal=session.get("current_proposal", ""),
+    )
+    response = result.get("vision") or result.get("raw", "")
+    proposal = result.get("proposal") or session.get("current_proposal", "")
+    history.append({"role": "assistant", "content": response})
+    session["plan_history"]     = history
+    session["current_proposal"] = proposal
+    _session_chat("assistant", response, state, app)
+    if proposal and proposal != response:
+        _session_chat("system", f"Updated plan:\n{proposal[:500]}", state, app)
+
+
 # ── Ticker thread (elapsed time + spinner) ────────────────────────────────────
 
 def _ticker_thread(state: _State, app: Application, stop: threading.Event,
@@ -1335,6 +1621,16 @@ def run_dashboard() -> None:
         state.chat.append({"role": "user", "text": text})
         state.scroll_r = max(0, _count_chat_lines(state.chat) - 20)
 
+        # ── Active session: route message into it ──
+        if state.active_session:
+            t = threading.Thread(
+                target=_continue_session,
+                args=(text, state, event.app),
+                daemon=True,
+            )
+            t.start()
+            return
+
         # ── Special: approve staged plan ──
         if state.staging and text.lower() in APPROVE_KW:
             state.staging = False
@@ -1342,8 +1638,38 @@ def run_dashboard() -> None:
             event.app.invalidate()
             return
 
-        # ── Special: plan_day → staging flow ──
         tl = text.lower()
+
+        # ── Session starter: review ──
+        if any(kw in tl for kw in ("review", "weekly review", "monthly review", "quarterly review")):
+            cadence = ("quarterly" if "quarter" in tl
+                       else "monthly" if "month" in tl
+                       else "weekly")
+            t = threading.Thread(
+                target=_start_review_session,
+                args=(cadence, state, event.app),
+                daemon=True,
+            )
+            t.start()
+            return
+
+        # ── Session starter: plan with scope (non-daily) ──
+        if "plan" in tl and not any(kw in tl for kw in
+                ("plan my day", "plan for today", "let's plan", "plan day")):
+            scope = ("quarterly" if "quarter" in tl
+                     else "monthly" if "month" in tl
+                     else "weekly" if "week" in tl
+                     else None)
+            if scope:
+                t = threading.Thread(
+                    target=_start_plan_session,
+                    args=(scope, state, event.app),
+                    daemon=True,
+                )
+                t.start()
+                return
+
+        # ── Special: plan_day → staging flow ──
         if any(kw in tl for kw in ("plan my day", "plan for today", "let's plan", "plan day")):
             t = threading.Thread(
                 target=_run_plan_bg,
