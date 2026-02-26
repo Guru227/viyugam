@@ -53,9 +53,9 @@ def _build_context_summary() -> str:
         state = storage.load_state()
         config = storage.load_config()
 
-        last_plan = state.last_plan_date or "never"
-        last_review = state.last_review_date or "never"
-        last_log = state.last_log_date or "never"
+        last_plan = state.last_plan or "never"
+        last_review = state.last_review or "never"
+        last_log = state.last_log or "never"
 
         season_str = ""
         if config.season:
@@ -107,9 +107,9 @@ def _show_greeting() -> None:
         if overdue:
             parts.append(f"{len(overdue)} overdue")
 
-        if state.last_review_date:
+        if state.last_review:
             try:
-                last = date.fromisoformat(state.last_review_date)
+                last = date.fromisoformat(state.last_review)
                 days_ago = (today - last).days
                 if days_ago >= 7:
                     parts.append(f"Last review: {days_ago} days ago")
@@ -358,11 +358,11 @@ def _delete_goal_by_hint(hint: str | None) -> None:
 def _ai_dispatch(text: str) -> None:
     """Classify text with AI, then execute each action in the returned list."""
     from viyugam.main import (
-        cmd_plan, cmd_log, cmd_done, cmd_think, cmd_review,
-        cmd_status, cmd_finance, cmd_goals, cmd_decisions,
+        cmd_plan, cmd_log, cmd_done, cmd_review,
+        cmd_finance, cmd_goals, cmd_decisions,
         cmd_backlog, cmd_horizon, cmd_okrs, cmd_slow_burns,
         cmd_research, cmd_find, cmd_calendar, cmd_constitution,
-        _check_api_key, _log_entry,
+        _check_api_key, _triage_capture,
     )
     from viyugam.agents.intent import classify_intent
 
@@ -394,36 +394,51 @@ def _ai_dispatch(text: str) -> None:
             return
 
         if action == "plan_day":
-            cmd_plan(argparse.Namespace(replan=False))
+            cadence = (args.get("review_cadence") or "daily").lower()
+            cmd_plan(argparse.Namespace(replan=False, scope=cadence))
 
         elif action == "log_content":
             text_val = args.get("text") or text
-            _log_entry(text_val)
+            _triage_capture(text_val)
 
         elif action == "mark_done":
-            _done_by_hint(args.get("task_title_hint"))
+            hint = args.get("task_title_hint") or ""
+            # Check if it looks like a seq_id pattern
+            import re as _re
+            if _re.match(r'^[TGPNtgpn]-\d{3,}$', hint.strip()):
+                result = storage.mark_entity_done(hint.strip().upper())
+                if result:
+                    console.print(f"[green]{result}[/green]")
+                else:
+                    console.print(f"[yellow]Not found:[/yellow] {hint}")
+            else:
+                _done_by_hint(hint)
 
         elif action == "run_think":
-            proposal = args.get("proposal") or text
-            cmd_think(argparse.Namespace(proposal=[proposal]))
+            # Redirect: capture to triage for boardroom discussion during plan
+            text_val = args.get("proposal") or text
+            _triage_capture(text_val)
+            console.print("[dim]Captured to triage. Run 'plan' to process it in the boardroom.[/dim]")
 
         elif action == "run_review":
-            cadence = (args.get("review_cadence") or "").lower()
+            cadence = (args.get("review_cadence") or "weekly").lower()
             cmd_review(argparse.Namespace(
                 weekly=(cadence == "weekly"),
                 monthly=(cadence == "monthly"),
                 quarterly=(cadence == "quarterly"),
+                scope=cadence,
             ))
 
         elif action == "show_status":
-            cmd_status(argparse.Namespace())
+            # Redirect to dashboard hint
+            console.print("[dim]Dashboard is always available — run 'viyugam' with no args.[/dim]")
 
         elif action == "show_finance":
             cmd_finance(argparse.Namespace(sub="summary"))
 
         elif action == "log_finance":
             text_val = args.get("text") or text
-            _log_entry(text_val)
+            _triage_capture(text_val)
 
         elif action == "finance_history":
             cmd_finance(argparse.Namespace(sub="history"))
@@ -442,7 +457,7 @@ def _ai_dispatch(text: str) -> None:
 
         elif action == "add_goal":
             text_val = args.get("text") or text
-            _log_entry(text_val)
+            _triage_capture(text_val)
 
         elif action == "show_decisions":
             cmd_decisions(argparse.Namespace())
@@ -470,7 +485,7 @@ def _ai_dispatch(text: str) -> None:
         elif action == "show_calendar":
             cmd_calendar(argparse.Namespace(add=False, delete=False))
 
-        elif action == "show_constitution":
+        elif action in ("show_constitution", "show_values"):
             cmd_constitution(argparse.Namespace())
 
         elif action == "show_dashboard":

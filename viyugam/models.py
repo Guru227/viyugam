@@ -1,7 +1,7 @@
 from __future__ import annotations
 from datetime import date, datetime
 from enum import Enum
-from typing import Optional, List
+from typing import Literal, Optional, List
 from pydantic import BaseModel, Field, model_validator
 import uuid
 
@@ -66,10 +66,17 @@ class Task(BaseModel):
     overdue_count:      int          = 0
     created_at:         str          = Field(default_factory=lambda: datetime.now().isoformat())
     notes:              Optional[str] = None
+    # Phase 0 additions
+    due:                Optional[str] = None   # YYYY-MM-DD
+    priority:           Literal["high", "medium", "low"] = "medium"
+    boardroom_notes:    Optional[str] = None
+    snooze_until:       Optional[str] = None   # YYYY-MM-DD
+    seq_id:             Optional[str] = None   # T-NNN sequential display ID
 
 
 class Project(BaseModel):
     id:           str           = Field(default_factory=new_id)
+    seq_id:       Optional[str] = None   # P-NNN
     title:        str
     description:  Optional[str] = None
     status:       ProjectStatus = ProjectStatus.ACTIVE
@@ -83,10 +90,12 @@ class Project(BaseModel):
 
 class Goal(BaseModel):
     id:          str        = Field(default_factory=new_id)
+    seq_id:      Optional[str] = None   # G-NNN
     title:       str
     description: Optional[str] = None
     dimension:   Dimension
     is_active:   bool       = True
+    is_pseudo:   bool       = False   # True for ~maintenance, ~unplanned
     created_at:  str        = Field(default_factory=lambda: datetime.now().isoformat())
 
 
@@ -96,6 +105,29 @@ class InboxItem(BaseModel):
     source:       str  = "cli"
     is_processed: bool = False
     created_at:   str  = Field(default_factory=lambda: datetime.now().isoformat())
+
+
+class TriageItem(BaseModel):
+    """Triage capture — replaces InboxItem as the primary capture model."""
+    id:              str           = Field(default_factory=new_id)
+    content:         str
+    source:          str           = "cli"
+    processed:       bool          = False
+    snooze_until:    Optional[str] = None   # YYYY-MM-DD
+    boardroom_notes: Optional[str] = None
+    created_at:      str           = Field(default_factory=lambda: datetime.now().isoformat())
+
+
+class Note(BaseModel):
+    """Knowledge piece — N-NNN sequential ID."""
+    id:         str           = Field(default_factory=new_id)
+    seq_id:     Optional[str] = None   # N-NNN
+    title:      str
+    content:    str           = ""
+    dimension:  Optional[Dimension] = None
+    tags:       list[str]     = []
+    created_at: str           = Field(default_factory=lambda: datetime.now().isoformat())
+    updated_at: str           = Field(default_factory=lambda: datetime.now().isoformat())
 
 
 class SomedayItem(BaseModel):

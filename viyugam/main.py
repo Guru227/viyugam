@@ -141,6 +141,444 @@ def cmd_capture(args: argparse.Namespace) -> None:
         cmd_log(args)
 
 
+# ── Interactive triage session ─────────────────────────────────────────────────
+
+def _create_entity_from_classified(classified: dict, boardroom_notes: str = "") -> str:
+    """Create a Task/Goal/Project/Note from classified triage item. Returns human-readable label."""
+    from viyugam.models import Goal, Dimension as _Dim
+    from viyugam.models import ProjectStatus
+    from viyugam.storage import _next_id
+
+    etype = classified.get("type", "task")
+    title = classified.get("title", "Untitled")
+    dim_str = classified.get("dimension")
+    try:
+        dimension = _Dim(dim_str) if dim_str else None
+    except ValueError:
+        dimension = None
+
+    if etype == "task":
+        task = Task(
+            title=title,
+            dimension=dimension,
+            energy_cost=classified.get("energy_cost", 5),
+            estimated_minutes=classified.get("estimated_minutes", 30),
+            due=classified.get("due"),
+            priority=classified.get("priority", "medium"),
+            boardroom_notes=boardroom_notes or None,
+        )
+        storage.save_task(task)
+        return f"Task {task.seq_id}: {title}"
+
+    elif etype == "goal":
+        goal = Goal(
+            title=title,
+            dimension=dimension or _Dim.CAREER,
+            description=boardroom_notes or None,
+        )
+        storage.save_goal(goal)
+        return f"Goal {goal.seq_id}: {title}"
+
+    elif etype == "project":
+        from viyugam.models import Project as _Project
+        project = _Project(
+            title=title,
+            dimension=dimension,
+            description=boardroom_notes or None,
+        )
+        storage.save_project(project)
+        return f"Project {project.seq_id}: {title}"
+
+    elif etype == "note":
+        from viyugam.models import Note as _Note
+        note = _Note(
+            title=title,
+            content=boardroom_notes or classified.get("initial_draft", ""),
+            dimension=dimension,
+        )
+        storage.save_note(note)
+        return f"Note {note.seq_id}: {title}"
+
+    else:
+        # Default to task
+        task = Task(title=title, dimension=dimension, boardroom_notes=boardroom_notes or None)
+        storage.save_task(task)
+        return f"Task {task.seq_id}: {title}"
+
+
+def _run_triage_session() -> int:
+    """
+    Interactive triage session. Processes all unprocessed/expired-snooze triage items.
+    Returns number of items processed.
+    Runs D/A/S///X loop per item.
+    """
+    from viyugam.agents.chairman import classify_item, boardroom_discuss_turn, triage_dedup
+
+    items = storage.get_triage(unprocessed_only=True)
+    if not items:
+        return 0
+
+    console.print()
+    console.print(Panel(
+        f"[bold]Triage · {len(items)} item(s) to process[/bold]",
+        border_style="dim cyan",
+        padding=(0, 2),
+    ))
+
+    # Dedup check (optional — skip if few items)
+    if len(items) > 2:
+        existing_tasks = storage.get_tasks()
+        try:
+            with console.status("[dim]Checking for duplicates...[/dim]"):
+                dupes = triage_dedup(
+                    [i.model_dump() for i in items],
+                    [t.model_dump() for t in existing_tasks[:30]]
+                )
+            if dupes:
+                console.print(f"\n[yellow]Possible duplicates found:[/yellow]")
+                for d in dupes:
+                    new = next((i for i in items if i.id == d.get("new_id")), None)
+                    existing = storage.get_task_by_id(d.get("existing_id", ""))
+                    if new and existing:
+                        console.print(f"  · '{new.content[:50]}' ↔ '{existing.title[:50]}'")
+                        console.print(f"    [dim]Reason: {d.get('reason', '')}[/dim]")
+                console.print()
+        except Exception:
+            pass
+
+    processed_count = 0
+
+    for idx, item in enumerate(items):
+        console.print(f"\n[bold cyan][{idx+1}/{len(items)}][/bold cyan] [dim]{item.created_at[:10]}[/dim]")
+        console.print(f"  [white]{item.content}[/white]")
+
+        # Classify item
+        try:
+            with console.status("[dim]Classifying...[/dim]"):
+                classified = classify_item(item.content)
+        except Exception as e:
+            classified = {"type": "task", "title": item.content[:80], "dimension": None,
+                          "priority": "medium", "due": None, "estimated_minutes": 30,
+                          "energy_cost": 5, "initial_draft": item.content}
+
+        # Display classified card
+        etype = classified.get("type", "task").upper()
+        title = classified.get("title", item.content[:60])
+        dim = classified.get("dimension") or "—"
+        priority = classified.get("priority", "medium")
+        due = classified.get("due") or "—"
+        draft = classified.get("initial_draft", "")
+
+        console.print(f"\n  [bold]{etype}[/bold]  [cyan]{title}[/cyan]")
+        console.print(f"  [dim]{dim} · {priority} · due: {due}[/dim]")
+        if draft:
+            console.print(f"  [dim italic]{draft}[/dim italic]")
+
+        console.print(
+            "\n  [bold](D)[/bold]iscuss  [bold](A)[/bold]ccept  "
+            "[bold](S)[/bold]nooze  [bold](/)[/bold]Split  [bold](X)[/bold]Delete"
+        )
+
+        boardroom_notes = ""
+        current_draft = title
+
+        while True:
+            try:
+                choice = Prompt.ask("  Choice", default="A").strip().upper()
+            except (KeyboardInterrupt, EOFError):
+                console.print("\n[dim]Triage paused.[/dim]")
+                return processed_count
+
+            if choice == "D":
+                # Boardroom discussion loop
+                history: list[dict] = []
+                console.print(f"\n  [dim]Boardroom — say your thoughts. Type 'done' to accept, 'snooze' to defer.[/dim]")
+                console.print(f"  [dim italic]Draft: {current_draft}[/dim italic]\n")
+
+                while True:
+                    try:
+                        user_input = Prompt.ask("  [bold]You[/bold]")
+                    except (KeyboardInterrupt, EOFError):
+                        break
+
+                    user_lower = user_input.strip().lower()
+                    if user_lower in ("done", "accept", "ok", "approve"):
+                        choice = "A"
+                        break
+                    if user_lower == "snooze":
+                        choice = "S"
+                        break
+                    if not user_input.strip():
+                        continue
+
+                    try:
+                        with console.status("[dim]Boardroom...[/dim]"):
+                            result = boardroom_discuss_turn(
+                                original=item.content,
+                                current_draft=current_draft,
+                                user_message=user_input,
+                                history=history,
+                            )
+                        history.append({"role": "user", "content": user_input})
+                        history.append({"role": "assistant", "content": json.dumps(result)})
+
+                        if result.get("vision"):
+                            console.print(f"\n  [dim]Vision:[/dim] {result['vision']}")
+                        if result.get("resource"):
+                            console.print(f"  [dim]Resource:[/dim] {result['resource']}")
+                        if result.get("risk"):
+                            console.print(f"  [dim]Risk:[/dim] {result['risk']}")
+                        if result.get("synthesis"):
+                            console.print(f"  [cyan]Synthesis:[/cyan] {result['synthesis']}")
+
+                        current_draft = result.get("draft", current_draft)
+                        classified["title"] = current_draft
+                        console.print(f"\n  [dim italic]Draft: {current_draft}[/dim italic]")
+                        boardroom_notes = "\n".join(
+                            [f"Vision: {result.get('vision','')}",
+                             f"Resource: {result.get('resource','')}",
+                             f"Risk: {result.get('risk','')}"]
+                        )
+                    except Exception as e:
+                        console.print(f"  [red]Boardroom error: {e}[/red]")
+
+                if choice not in ("A", "S"):
+                    console.print("  [bold](A)[/bold]ccept  [bold](S)[/bold]nooze  [bold](X)[/bold]Delete")
+                    continue
+
+            if choice == "A":
+                label = _create_entity_from_classified(classified, boardroom_notes)
+                storage.mark_triage_processed([item.id])
+                console.print(f"  [green]Created:[/green] {label}")
+                processed_count += 1
+                break
+
+            elif choice == "S":
+                next_sun = storage.next_sunday()
+                try:
+                    date_input = Prompt.ask(
+                        f"  Snooze until [dim](default: {next_sun})[/dim]",
+                        default=next_sun.isoformat()
+                    ).strip()
+                    snooze_date = date.fromisoformat(date_input)
+                except Exception:
+                    snooze_date = next_sun
+                item.snooze_until = snooze_date.isoformat()
+                storage.save_triage_item(item)
+                console.print(f"  [yellow]Snoozed until {item.snooze_until}[/yellow]")
+                processed_count += 1
+                break
+
+            elif choice == "/":
+                # Split into multiple items
+                try:
+                    n_str = Prompt.ask("  How many items to split into", default="2")
+                    n = max(2, min(10, int(n_str)))
+                except Exception:
+                    n = 2
+                console.print(f"  Enter {n} sub-items (Enter to skip one):")
+                new_texts = []
+                for i in range(n):
+                    try:
+                        sub = Prompt.ask(f"  Item {i+1}").strip()
+                        if sub:
+                            new_texts.append(sub)
+                    except (KeyboardInterrupt, EOFError):
+                        break
+                for sub_text in new_texts:
+                    storage.append_triage(sub_text)
+                storage.mark_triage_processed([item.id])
+                console.print(f"  [green]Split into {len(new_texts)} items.[/green]")
+                processed_count += 1
+                break
+
+            elif choice == "X":
+                storage.mark_triage_processed([item.id])
+                console.print("  [dim]Deleted.[/dim]")
+                processed_count += 1
+                break
+
+            else:
+                console.print("  [dim]D / A / S / / / X[/dim]")
+
+    if processed_count > 0:
+        console.print(f"\n[green]Triage complete.[/green] {processed_count} item(s) processed.\n")
+    return processed_count
+
+
+# ── Directive boardroom planning (non-daily scopes) ───────────────────────────
+
+def _run_boardroom_plan(scope: str, state, config, today: str) -> None:
+    """Run directive boardroom planning session for weekly/monthly/quarterly scope."""
+    from viyugam.agents.chairman import (
+        generate_initial_plan_proposal, directive_boardroom_turn, _build_plan_context
+    )
+
+    # Determine period boundaries
+    today_date = date.fromisoformat(today)
+    p_start = storage.period_start(scope, today_date)
+    p_end = storage.period_end(scope, today_date)
+
+    # Determine parent plan for cascade check
+    parent_scope = {"weekly": "monthly", "monthly": "quarterly", "quarterly": None}.get(scope)
+    parent_plan = storage.load_plan(parent_scope) if parent_scope else {}
+
+    # Load context
+    goals = storage.get_goals()
+    all_tasks = storage.get_tasks()
+    # Filter tasks relevant to this period
+    tasks = [
+        t for t in all_tasks
+        if t.status.value != "done" and (
+            not t.due or t.due <= p_end.isoformat()
+        )
+    ]
+    values = storage.load_values()
+    budget_envelopes = storage.get_budget_envelope_summary()
+
+    scope_label = scope.upper()
+    console.print()
+    console.print(Panel(
+        f"[bold]Plan · {scope_label} · {p_start} → {p_end}[/bold]",
+        border_style="dim cyan",
+        padding=(0, 2),
+    ))
+
+    # Cascade check
+    if parent_plan.get("goals"):
+        parent_goals = parent_plan.get("goals", [])
+        task_titles = " ".join(t.title.lower() for t in tasks)
+        gaps = []
+        for pg in parent_goals:
+            pg_str = str(pg).lower()
+            if pg_str[:20] not in task_titles:
+                gaps.append(pg)
+        if gaps:
+            console.print("\n[yellow]Cascade gaps[/yellow] — parent plan items with no matching tasks:")
+            for g in gaps[:5]:
+                console.print(f"  · {g}")
+            console.print()
+
+    # Generate initial proposal
+    try:
+        with console.status("[dim]Chairman generating proposal...[/dim]"):
+            result = generate_initial_plan_proposal(
+                scope=scope,
+                tasks=[t.model_dump() for t in tasks[:20]],
+                goals=[g.model_dump() for g in goals],
+                parent_plan=parent_plan,
+                values=values,
+                budget_envelopes=budget_envelopes,
+                period_start=p_start.isoformat(),
+                period_end=p_end.isoformat(),
+            )
+    except Exception as e:
+        console.print(f"[red]Planning error: {e}[/red]")
+        return
+
+    _display_boardroom_result(result)
+    proposal = result.get("proposal", "")
+
+    # Boardroom conversation loop
+    history: list[dict] = []
+    context = _build_plan_context(
+        scope=scope,
+        tasks=[t.model_dump() for t in tasks[:20]],
+        goals=[g.model_dump() for g in goals],
+        parent_plan=parent_plan,
+        values=values,
+        budget_envelopes=budget_envelopes,
+        period_start=p_start.isoformat(),
+        period_end=p_end.isoformat(),
+    )
+
+    console.print("\n[dim]Challenge the plan or type 'approve' to save it.[/dim]\n")
+
+    while True:
+        try:
+            user_input = Prompt.ask("[bold]You[/bold]")
+        except (KeyboardInterrupt, EOFError):
+            console.print("\n[dim]Planning cancelled.[/dim]")
+            return
+
+        user_lower = user_input.strip().lower()
+        if user_lower in ("approve", "looks good", "lgtm", "yes", "ok", "confirmed", "save"):
+            break
+        if user_lower in ("quit", "exit", "cancel"):
+            console.print("[dim]Planning cancelled.[/dim]")
+            return
+        if not user_input.strip():
+            continue
+
+        try:
+            with console.status("[dim]Boardroom...[/dim]"):
+                result = directive_boardroom_turn(
+                    scope=scope,
+                    context=context,
+                    user_message=user_input,
+                    history=history,
+                    current_proposal=proposal,
+                )
+            history.append({"role": "user", "content": user_input})
+            history.append({"role": "assistant", "content": result.get("raw", "")})
+            _display_boardroom_result(result)
+            proposal = result.get("proposal", proposal)
+        except Exception as e:
+            console.print(f"[red]Boardroom error: {e}[/red]")
+
+    # Save plan
+    plan_data = {
+        "scope": scope,
+        "period_start": p_start.isoformat(),
+        "period_end": p_end.isoformat(),
+        "goals": [g.title for g in goals[:10]],
+        "proposal": proposal,
+        "constraints": result.get("constraint_summary", {}) if "result" in dir() else {},
+        "cascade_gaps": result.get("cascade_gaps", []) if "result" in dir() else [],
+        "created_at": datetime.now().isoformat(),
+    }
+    path = storage.save_plan(scope, plan_data)
+    console.print(f"\n[green]Plan saved:[/green] [dim]{path}[/dim]")
+
+    state = storage.touch_active(state)
+    state.last_plan = today
+    storage.save_state(state)
+
+
+def _display_boardroom_result(result: dict) -> None:
+    """Display a boardroom turn result."""
+    if result.get("vision"):
+        console.print(f"\n[dim]Vision:[/dim] {result['vision']}")
+    if result.get("resource"):
+        console.print(f"[dim]Resource:[/dim] {result['resource']}")
+    if result.get("risk"):
+        console.print(f"[dim]Risk:[/dim] {result['risk']}")
+
+    proposal = result.get("proposal", "")
+    if proposal:
+        console.print(f"\n[bold]Proposal:[/bold]")
+        if isinstance(proposal, list):
+            for p in proposal:
+                console.print(f"  · {p}")
+        else:
+            for line in str(proposal).split("\n"):
+                if line.strip():
+                    console.print(f"  {line}")
+
+    constraints = result.get("constraint_summary", {})
+    if constraints and constraints.get("time_total", 0) > 0:
+        t_used = constraints.get("time_used", 0)
+        t_total = constraints.get("time_total", 0)
+        console.print(f"\n  [dim]Time: {t_used}/{t_total}h  Budget: {constraints.get('budget_used', 0)}/{constraints.get('budget_total', 0)}[/dim]")
+
+    gaps = result.get("cascade_gaps", [])
+    if gaps:
+        console.print(f"  [yellow]Gaps:[/yellow] {', '.join(str(g) for g in gaps[:3])}")
+
+    if result.get("values_alignment"):
+        console.print(f"  [dim italic]{result['values_alignment']}[/dim italic]")
+
+
 # ── plan ───────────────────────────────────────────────────────────────────────
 
 def cmd_plan(args: argparse.Namespace) -> None:
@@ -149,6 +587,32 @@ def cmd_plan(args: argparse.Namespace) -> None:
     state = startup_check()
     config = storage.load_config()
     today = date.today().isoformat()
+
+    # ── Scope detection (daily/weekly/monthly/quarterly) ───────────────────────
+    scope = getattr(args, "scope", "daily") or "daily"
+    scope = scope.lower().strip()
+    # Normalise aliases
+    if scope in ("week", "w"):
+        scope = "weekly"
+    elif scope in ("month", "m"):
+        scope = "monthly"
+    elif scope in ("quarter", "q", "quarterly"):
+        scope = "quarterly"
+    elif scope not in ("daily", "weekly", "monthly", "quarterly"):
+        scope = "daily"
+
+    # ── Phase 1: Triage session if there are unprocessed items ────────────────
+    skip_triage = getattr(args, "_skip_triage", False)
+    if not skip_triage:
+        triage_items = storage.get_triage(unprocessed_only=True)
+        if triage_items:
+            console.print(f"[dim]{len(triage_items)} unprocessed triage item(s) — clearing before planning...[/dim]")
+            _run_triage_session()
+
+    # ── For non-daily scopes: run directive boardroom planning ─────────────────
+    if scope != "daily":
+        _run_boardroom_plan(scope, state, config, today)
+        return
 
     now = datetime.now()
     current_time = now.strftime("%H:%M")
@@ -608,6 +1072,15 @@ def cmd_done(args: argparse.Namespace) -> None:
     state = startup_check()
     task_id = getattr(args, "task_id", None)
 
+    # Support T-NNN / G-NNN / P-NNN / N-NNN sequential IDs
+    if task_id and re.match(r'^[TGPNtgpn]-\d{3,}$', task_id):
+        result = storage.mark_entity_done(task_id.upper())
+        if result:
+            console.print(f"[green]{result}[/green]")
+        else:
+            console.print(f"[yellow]Not found:[/yellow] {task_id}")
+        return
+
     task = None
     if task_id:
         task = storage.get_task_by_id(task_id)
@@ -704,50 +1177,11 @@ def _handle_unscheduled_completion(task: Task) -> None:
 # ── status ─────────────────────────────────────────────────────────────────────
 
 def cmd_status(args: argparse.Namespace) -> None:
-    state = startup_check()
-    today = date.today().isoformat()
-    config = storage.load_config()
-
-    tasks_today = storage.get_tasks(scheduled_date=today)
-    done_today = [t for t in tasks_today if t.status == TaskStatus.DONE]
-    todo_today = [t for t in tasks_today if t.status == TaskStatus.TODO]
-    habits = storage.get_habits()
-    inbox_count = len(storage.get_inbox(unprocessed_only=True))
-
-    console.print()
-    console.print(Panel(
-        f"[bold]{today}[/bold]  ·  streak: [cyan]{state.current_streak}[/cyan] days",
-        title=f"[bold]Status · {config.user_name}[/bold]",
-        border_style="dim",
-        padding=(0, 2),
-    ))
-
-    # Today's progress
-    total = len(tasks_today)
-    done = len(done_today)
-    if total > 0:
-        bar = "█" * done + "░" * (total - done)
-        console.print(f"\n  Tasks today:  [{bar}] {done}/{total}")
-
-    if todo_today:
-        console.print("\n  [bold]Still to do:[/bold]")
-        for t in todo_today[:5]:
-            console.print(f"  [dim]{t.id}[/dim]  {t.title}  [dim]{t.estimated_minutes}m[/dim]")
-        if len(todo_today) > 5:
-            console.print(f"  [dim]  ... and {len(todo_today) - 5} more[/dim]")
-
-    if habits:
-        console.print("\n  [bold]Habits:[/bold]")
-        for h in habits:
-            done_marker = "[green]✓[/green]" if h.last_done == today else "[dim]○[/dim]"
-            console.print(f"  {done_marker}  {h.title}  [dim]streak: {h.streak}[/dim]")
-
-    if inbox_count > 0:
-        console.print(f"\n  [yellow]{inbox_count} unprocessed inbox item(s)[/yellow] — run [bold]viyugam plan[/bold]")
-
-    nudges = storage.get_nudges(state)
-    _show_nudges(nudges)
-    console.print()
+    console.print(
+        "\n[dim]'status' is no longer a standalone command.[/dim]\n"
+        "The dashboard is always available — run [bold]viyugam[/bold] with no arguments "
+        "or press [bold]d[/bold] in the REPL.\n"
+    )
 
 
 # ── calendar ───────────────────────────────────────────────────────────────────
@@ -1072,19 +1506,54 @@ def _log_entry(text: str, config=None, state=None) -> None:
     storage.save_state(state)
 
 
-def cmd_log(args: argparse.Namespace) -> None:
-    state = startup_check()
-    config = storage.load_config()
+_DONE_PATTERN = re.compile(r'^done\s+([TGPN]-\d{3,})\s*$', re.IGNORECASE)
 
-    # Check if text was passed directly
+
+def _triage_capture(text: str) -> None:
+    """
+    Frictionless capture to triage.json. No AI. <100ms.
+    Detects 'done T-NNN' pattern and routes to mark_entity_done.
+    """
+    text = text.strip()
+    if not text:
+        return
+
+    # Detect 'done T-NNN' pattern
+    m = _DONE_PATTERN.match(text)
+    if m:
+        seq_id = m.group(1).upper()
+        result = storage.mark_entity_done(seq_id)
+        if result:
+            console.print(f"[green]Done:[/green] {result}")
+        else:
+            console.print(f"[yellow]Not found:[/yellow] {seq_id}")
+        return
+
+    item = storage.append_triage(text)
+    seq_label = f" [dim]#{item.id[:6]}[/dim]" if item.id else ""
+    console.print(f"[green]Logged.[/green]{seq_label}")
+
+
+def cmd_log(args: argparse.Namespace) -> None:
+    startup_check()
+
+    # Check if text was passed directly (fast path)
     text_parts = getattr(args, "text", None)
     if text_parts:
         text = " ".join(text_parts)
-        _log_entry(text, config=config, state=state)
+        _triage_capture(text)
         return
 
-    # No text → journal session (existing coach behaviour)
-    _journal_session(args, state, config)
+    # Interactive multi-capture loop
+    console.print("[dim]Log captures (Enter blank to stop):[/dim]")
+    while True:
+        try:
+            text = Prompt.ask("[dim]>[/dim]", default="")
+        except (KeyboardInterrupt, EOFError):
+            break
+        if not text.strip():
+            break
+        _triage_capture(text)
 
 
 def _journal_session(args: argparse.Namespace, state, config) -> None:
@@ -2404,11 +2873,29 @@ def cmd_review(args: argparse.Namespace) -> None:
         state.last_review = today
         storage.save_state(state)
 
+    # ── Laminar phases (Phase 2 journal + Phase 3 Socratic + Phase 4 plan) ────
+    if len(history) > 1:
+        if Confirm.ask("\nContinue to per-dimension journal?", default=True):
+            _review_phase2_journal(cadence, today)
+
+        # Phase 3: Socratic values (quarterly only)
+        if cadence == "quarterly":
+            if Confirm.ask("\nRun Socratic values session?", default=True):
+                _review_phase3_socratic(cadence, today)
+
+        if Confirm.ask("\nRun planning session for next period?", default=False):
+            _review_phase4_plan(cadence, state, config, today)
+
     console.print()
 
 
 def _detect_cadence(state, args) -> str:
     """Detect review cadence from flags or last review date."""
+    # New: check scope arg first
+    scope = getattr(args, "scope", None)
+    if scope and scope in ("weekly", "monthly", "quarterly"):
+        return scope
+
     if getattr(args, "quarterly", False):
         return "quarterly"
     if getattr(args, "monthly", False):
@@ -2426,6 +2913,265 @@ def _detect_cadence(state, args) -> str:
         return "monthly"
     else:
         return "weekly"
+
+
+# ── Laminar Review ─────────────────────────────────────────────────────────────
+
+DIMENSIONS = ["career", "wealth", "health", "relationships", "joy", "learning"]
+
+
+def _review_phase1_retro(scope: str, state, config, today: str) -> bool:
+    """Phase 1: Retrospective. Returns True if completed."""
+    from viyugam.agents.reviewer import retro_turn
+
+    prior_plan = storage.load_plan(scope)
+    p_start = storage.period_start(scope, date.fromisoformat(today))
+    p_end = storage.period_end(scope, date.fromisoformat(today))
+    cutoff = p_start.isoformat()
+
+    all_tasks = storage.get_tasks()
+    done = [t.title for t in all_tasks if t.status.value == "done" and
+            t.scheduled_date and t.scheduled_date >= cutoff]
+    carried = [t.title for t in all_tasks if t.status.value != "done" and
+               t.scheduled_date and t.scheduled_date >= cutoff]
+
+    review_data = {
+        "scope": scope,
+        "period": f"{p_start} → {p_end}",
+        "prior_plan_goals": prior_plan.get("goals", []),
+        "done": done[:15],
+        "carried": carried[:10],
+        "triage_logs": [i.content for i in storage.get_recent_triage_logs(10)],
+    }
+
+    console.print(Panel(
+        f"[bold]Phase 1 · Retrospective[/bold]",
+        border_style="dim",
+        padding=(0, 2),
+    ))
+    console.print("[dim]Type your thoughts. 'next' to move on.[/dim]\n")
+
+    # Generate opening
+    try:
+        import json as _json
+        with console.status("[dim]Preparing retrospective...[/dim]"):
+            opener, _ = retro_turn([], _json.dumps(review_data, indent=2), scope, review_data)
+    except Exception as e:
+        opener = f"Let's look at your {scope}. {len(done)} tasks completed, {len(carried)} carried over. What stands out?"
+
+    console.print(f"[bold cyan]Reviewer:[/bold cyan] {opener}\n")
+    history = [{"role": "assistant", "content": opener}]
+
+    for _ in range(8):
+        try:
+            user_input = Prompt.ask("[bold]You[/bold]")
+        except (KeyboardInterrupt, EOFError):
+            return False
+
+        if user_input.lower().strip() in ("next", "skip", "done"):
+            return True
+        if not user_input.strip():
+            continue
+
+        history.append({"role": "user", "content": user_input})
+        try:
+            with console.status("[dim]...[/dim]"):
+                response, complete = retro_turn(history, user_input, scope, review_data)
+            history.append({"role": "assistant", "content": response})
+            console.print(f"\n[bold cyan]Reviewer:[/bold cyan] {response}\n")
+            if complete:
+                return True
+        except Exception as e:
+            console.print(f"[red]{e}[/red]")
+
+    return True
+
+
+def _review_phase2_journal(scope: str, today: str) -> None:
+    """Phase 2: Per-dimension journal. Writes journal/{today}-{scope}-{dim}.md for each."""
+    from viyugam.agents.reviewer import dim_journal_turn, synthesize_dim_journal
+
+    console.print(Panel(
+        f"[bold]Phase 2 · Journal by Dimension[/bold]",
+        border_style="dim",
+        padding=(0, 2),
+    ))
+    console.print(f"[dim]6 dimensions. Type 'next' to move on, 'skip' to skip.[/dim]\n")
+
+    for dim in DIMENSIONS:
+        console.print(f"\n[bold cyan]── {dim.upper()} ──[/bold cyan]")
+
+        # Check if already journaled this dim today
+        journal_path = storage.JOURNAL / f"{today}-{scope}-{dim}.md"
+        if journal_path.exists():
+            console.print(f"  [dim]Already journaled.[/dim]")
+            continue
+
+        # Opening question
+        try:
+            with console.status("[dim]...[/dim]"):
+                opener, _ = dim_journal_turn([], "open", dim, scope)
+        except Exception:
+            opener = f"How was your {dim} this {scope.rstrip('ly')}?"
+
+        console.print(f"[bold cyan]Reviewer:[/bold cyan] {opener}\n")
+        history = [{"role": "assistant", "content": opener}]
+        skipped = False
+
+        for _ in range(5):
+            try:
+                user_input = Prompt.ask("[bold]You[/bold]")
+            except (KeyboardInterrupt, EOFError):
+                skipped = True
+                break
+
+            user_lower = user_input.lower().strip()
+            if user_lower in ("next", "done"):
+                break
+            if user_lower == "skip":
+                skipped = True
+                break
+            if not user_input.strip():
+                continue
+
+            history.append({"role": "user", "content": user_input})
+            try:
+                with console.status("[dim]...[/dim]"):
+                    response, complete = dim_journal_turn(history, user_input, dim, scope)
+                history.append({"role": "assistant", "content": response})
+                console.print(f"\n[bold cyan]Reviewer:[/bold cyan] {response}\n")
+                if complete:
+                    break
+            except Exception as e:
+                console.print(f"[red]{e}[/red]")
+
+        # Write journal entry
+        if skipped:
+            content = "skipped"
+        elif len(history) > 1:
+            try:
+                with console.status("[dim]Synthesising...[/dim]"):
+                    content = synthesize_dim_journal(history, dim, scope, today)
+            except Exception:
+                content = "\n".join(
+                    f"{'Reviewer' if m['role']=='assistant' else 'You'}: {m['content']}"
+                    for m in history
+                )
+        else:
+            content = "No entry."
+
+        journal_path.write_text(
+            f"# {dim.title()} · {scope.title()} · {today}\n\n{content}\n"
+        )
+        console.print(f"  [green]Saved.[/green] [dim]{journal_path.name}[/dim]")
+
+
+def _review_phase3_socratic(scope: str, today: str) -> None:
+    """Phase 3: Socratic values session (quarterly only). Updates values.yaml."""
+    from viyugam.agents.socratic import synthesize_patterns, next_question, draft_values_diff
+    from pathlib import Path
+
+    console.print(Panel(
+        f"[bold]Phase 3 · Socratic Values[/bold]",
+        border_style="dim",
+        padding=(0, 2),
+    ))
+    console.print("[dim]Quarterly values reflection. 'next' to wrap up, 'skip' to skip.[/dim]\n")
+
+    # Load journal entries for this period
+    period_start = storage.period_start(scope, date.fromisoformat(today))
+    journal_entries = []
+    for dim in DIMENSIONS:
+        for scope_key in (scope, "weekly"):
+            path = storage.JOURNAL / f"{today}-{scope_key}-{dim}.md"
+            if path.exists():
+                journal_entries.append({
+                    "dimension": dim,
+                    "date": today,
+                    "content": path.read_text()[:400],
+                })
+                break
+
+    values = storage.load_values()
+
+    # Synthesise patterns
+    try:
+        with console.status("[dim]Synthesising patterns...[/dim]"):
+            patterns = synthesize_patterns(journal_entries, values)
+        console.print(f"[bold]Patterns:[/bold] {patterns}\n")
+    except Exception as e:
+        patterns = "Pattern synthesis unavailable."
+        console.print(f"[dim]{patterns}[/dim]\n")
+
+    # Socratic conversation
+    conversation: list[dict] = []
+    for _ in range(6):
+        try:
+            with console.status("[dim]...[/dim]"):
+                question, complete = next_question(patterns, conversation)
+        except Exception:
+            break
+
+        console.print(f"[bold cyan]Viyugam:[/bold cyan] {question}\n")
+        conversation.append({"role": "assistant", "content": question})
+
+        try:
+            user_input = Prompt.ask("[bold]You[/bold]")
+        except (KeyboardInterrupt, EOFError):
+            break
+
+        user_lower = user_input.lower().strip()
+        if user_lower in ("next", "done", "skip"):
+            break
+
+        conversation.append({"role": "user", "content": user_input})
+        if complete:
+            break
+
+    if not conversation:
+        console.print("[dim]Socratic session skipped.[/dim]")
+        return
+
+    # Draft values diff
+    try:
+        with console.status("[dim]Drafting values update...[/dim]"):
+            diff = draft_values_diff(values, conversation)
+    except Exception as e:
+        console.print(f"[yellow]Could not draft values update: {e}[/yellow]")
+        return
+
+    console.print(f"\n[bold]Proposed values update:[/bold]")
+    if diff.get("prayer"):
+        console.print(f"  Prayer: {diff['prayer'][:100]}")
+    for dim, text in (diff.get("chapters") or {}).items():
+        if text:
+            console.print(f"  {dim}: {text[:80]}")
+    if diff.get("rationale"):
+        console.print(f"  [dim italic]{diff['rationale']}[/dim italic]")
+
+    if Confirm.ask("\nApply these updates to values.yaml?", default=True):
+        if diff.get("prayer"):
+            values["prayer"] = diff["prayer"]
+        if not values.get("chapters"):
+            values["chapters"] = {}
+        for dim, text in (diff.get("chapters") or {}).items():
+            if text:
+                values["chapters"][dim] = text
+        storage.save_values(values)
+        console.print(f"[green]Values updated.[/green] [dim]{storage.VALUES_FILE}[/dim]")
+    else:
+        console.print("[dim]Values unchanged.[/dim]")
+
+
+def _review_phase4_plan(scope: str, state, config, today: str) -> None:
+    """Phase 4: Cascade check + plan. Calls into cmd_plan with the scope."""
+    console.print(Panel(
+        f"[bold]Phase 4 · Plan[/bold]",
+        border_style="dim",
+        padding=(0, 2),
+    ))
+    if Confirm.ask(f"Run {scope} planning session now?", default=True):
+        _run_boardroom_plan(scope, state, config, today)
 
 
 def _someday_days_old(item: dict) -> int:

@@ -477,3 +477,86 @@ def format_review_markdown(
     lines.append("```\n")
 
     return "\n".join(lines)
+
+
+# ── Laminar Review — Phase 1: Retrospective ────────────────────────────────────
+
+RETRO_SYSTEM = """You are running the Retrospective phase of a {scope} review for Viyugam.
+Analyse planned-vs-done, surfacing patterns honestly.
+Rules:
+- Be direct, not validating.
+- Reference actual data (planned tasks vs completed, triage logs).
+- One key question to open. When user says 'next', reply with [PHASE_COMPLETE] on its own line.
+"""
+
+
+def retro_turn(
+    history: list[dict],
+    user_message: str,
+    scope: str,
+    review_data: dict,
+) -> tuple[str, bool]:
+    """One turn of retrospective phase. Returns (response, is_complete)."""
+    client = _client()
+    system = RETRO_SYSTEM.format(scope=scope)
+    messages = list(history)
+    messages.append({"role": "user", "content": redact(user_message)})
+    response = client.messages.create(
+        model="claude-sonnet-4-6",
+        max_tokens=512,
+        system=system,
+        messages=messages,
+    )
+    text = response.content[0].text.strip()
+    complete = "[PHASE_COMPLETE]" in text
+    text = text.replace("[PHASE_COMPLETE]", "").strip()
+    return text, complete
+
+
+# ── Laminar Review — Phase 2: Journal by Dimension ────────────────────────────
+
+DIM_JOURNAL_SYSTEM = """You are running the {dimension} dimension journal in a {scope} review.
+Use the lens of {dimension} to reflect on this period.
+Prompt the user with one focused question about their {dimension} life.
+When user says 'next' or 'skip', write [PHASE_COMPLETE] on its own line.
+Keep responses concise (≤120 words).
+"""
+
+
+def dim_journal_turn(
+    history: list[dict],
+    user_message: str,
+    dimension: str,
+    scope: str,
+) -> tuple[str, bool]:
+    """One turn of per-dimension journal. Returns (response, is_complete)."""
+    client = _client()
+    system = DIM_JOURNAL_SYSTEM.format(dimension=dimension, scope=scope)
+    messages = list(history)
+    messages.append({"role": "user", "content": redact(user_message)})
+    response = client.messages.create(
+        model="claude-sonnet-4-6",
+        max_tokens=400,
+        system=system,
+        messages=messages,
+    )
+    text = response.content[0].text.strip()
+    complete = "[PHASE_COMPLETE]" in text
+    text = text.replace("[PHASE_COMPLETE]", "").strip()
+    return text, complete
+
+
+def synthesize_dim_journal(history: list[dict], dimension: str, scope: str, today: str) -> str:
+    """Synthesise a dimension journal conversation into a markdown entry."""
+    client = _client()
+    history_text = "\n".join(
+        f"{'Reviewer' if m['role']=='assistant' else 'You'}: {m['content']}"
+        for m in history
+    )
+    response = client.messages.create(
+        model="claude-sonnet-4-6",
+        max_tokens=300,
+        system=f"You are synthesising a {dimension} journal entry from a {scope} review conversation. Write 2-3 sentences capturing the essence. No preamble.",
+        messages=[{"role": "user", "content": f"Date: {today}\nConversation:\n{history_text}"}],
+    )
+    return response.content[0].text.strip()

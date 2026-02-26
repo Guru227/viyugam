@@ -291,3 +291,221 @@ GOALS (for context):
     result = json.loads(text)
     result["nudges"] = nudges
     return result
+
+
+# ── Interactive Triage Session ─────────────────────────────────────────────────
+
+CLASSIFY_ITEM_SYSTEM = """You are the Chairman classifying a single triage capture.
+Return ONLY a JSON object — no other text:
+{
+  "type": "task" | "goal" | "project" | "note",
+  "title": "Polished, clear title (≤80 chars)",
+  "dimension": "career" | "health" | "wealth" | "relationships" | "joy" | "learning" | null,
+  "priority": "high" | "medium" | "low",
+  "due": "YYYY-MM-DD or null",
+  "estimated_minutes": 15-480,
+  "energy_cost": 1-10,
+  "initial_draft": "Brief 1-2 sentence framing of this item for discussion"
+}"""
+
+
+def classify_item(content: str, context: str = "") -> dict:
+    """Classify a single triage capture. Returns structured dict."""
+    client = _client()
+    msg = f"{context}\n\nCapture: {redact(content)}" if context else f"Capture: {redact(content)}"
+    response = client.messages.create(
+        model="claude-sonnet-4-6",
+        max_tokens=512,
+        system=CLASSIFY_ITEM_SYSTEM,
+        messages=[{"role": "user", "content": msg}],
+    )
+    text = response.content[0].text.strip()
+    if text.startswith("```"):
+        text = text.split("\n", 1)[1].rsplit("```", 1)[0].strip()
+    try:
+        return json.loads(text)
+    except Exception:
+        return {"type": "task", "title": content[:80], "dimension": None,
+                "priority": "medium", "due": None, "estimated_minutes": 30,
+                "energy_cost": 5, "initial_draft": content}
+
+
+BOARDROOM_SYSTEM = """You are the Chairman running a boardroom discussion for Viyugam.
+Three internal voices speak: Vision (long-term alignment), Resource (time/energy/money realism), Risk (what could go wrong).
+
+For each turn:
+1. Each voice gives ONE punchy sentence about the current proposal.
+2. You synthesise into a revised draft (≤3 sentences).
+
+Return ONLY a JSON object:
+{
+  "vision": "...",
+  "resource": "...",
+  "risk": "...",
+  "synthesis": "Updated draft",
+  "draft": "Current working version of the task/goal/project definition"
+}"""
+
+
+def boardroom_discuss_turn(
+    original: str,
+    current_draft: str,
+    user_message: str,
+    history: list[dict],
+) -> dict:
+    """One turn of the boardroom discussion. Returns {vision, resource, risk, synthesis, draft}."""
+    client = _client()
+    messages = list(history)
+    messages.append({
+        "role": "user",
+        "content": f"Original capture: {redact(original)}\nCurrent draft: {current_draft}\nUser says: {redact(user_message)}",
+    })
+    response = client.messages.create(
+        model="claude-sonnet-4-6",
+        max_tokens=512,
+        system=BOARDROOM_SYSTEM,
+        messages=messages,
+    )
+    text = response.content[0].text.strip()
+    if text.startswith("```"):
+        text = text.split("\n", 1)[1].rsplit("```", 1)[0].strip()
+    try:
+        return json.loads(text)
+    except Exception:
+        return {"vision": "", "resource": "", "risk": "",
+                "synthesis": current_draft, "draft": current_draft}
+
+
+DEDUP_SYSTEM = """You are finding near-duplicate pairs in a triage list.
+Compare new captures against existing tasks.
+Return ONLY a JSON array of pairs (may be empty):
+[{"new_id": "...", "existing_id": "...", "reason": "why they might be duplicates"}]"""
+
+
+def triage_dedup(new_items: list[dict], existing_tasks: list[dict]) -> list[dict]:
+    """Find near-duplicate pairs between new triage items and existing tasks."""
+    if not new_items or not existing_tasks:
+        return []
+    client = _client()
+    msg = (
+        f"New triage items:\n{json.dumps([{'id': i['id'], 'content': i['content']} for i in new_items[:20]], indent=2)}\n\n"
+        f"Existing tasks:\n{json.dumps([{'id': t.get('id'), 'title': t.get('title')} for t in existing_tasks[:30]], indent=2)}"
+    )
+    response = client.messages.create(
+        model="claude-sonnet-4-6",
+        max_tokens=1024,
+        system=DEDUP_SYSTEM,
+        messages=[{"role": "user", "content": redact(msg)}],
+    )
+    text = response.content[0].text.strip()
+    if text.startswith("```"):
+        text = text.split("\n", 1)[1].rsplit("```", 1)[0].strip()
+    try:
+        return json.loads(text)
+    except Exception:
+        return []
+
+
+# ── Directive Boardroom Planning ───────────────────────────────────────────────
+
+DIRECTIVE_PLAN_SYSTEM = """You are the Chairman running a directive planning session for Viyugam.
+Three voices: Vision (long-term alignment), Resource (time/energy/money realism), Risk (what could go wrong).
+
+Your role: Open with a CONCRETE proposal based on the user's current tasks, goals, and constraints.
+Don't ask open-ended questions — make a specific, directional recommendation.
+
+For each turn return ONLY a JSON object:
+{
+  "vision": "Vision voice (1 sentence)",
+  "resource": "Resource voice (1 sentence)",
+  "risk": "Risk voice (1 sentence)",
+  "proposal": "Current working plan proposal (3-5 bullet points)",
+  "constraint_summary": {"time_used": 0, "time_total": 0, "budget_used": 0, "budget_total": 0},
+  "cascade_gaps": ["list of parent-goal items not covered by current tasks"],
+  "values_alignment": "Brief note on values alignment (or null)"
+}"""
+
+
+def directive_boardroom_turn(
+    scope: str,
+    context: str,
+    user_message: str,
+    history: list[dict],
+    current_proposal: str = "",
+) -> dict:
+    """One turn of directive boardroom planning. Returns structured plan dict."""
+    client = _client()
+    messages = list(history)
+    msg = (
+        f"Scope: {scope.upper()} planning\n"
+        f"Context:\n{context}\n\n"
+        f"Current proposal:\n{current_proposal}\n\n"
+        f"User says: {redact(user_message)}"
+    )
+    messages.append({"role": "user", "content": msg})
+    response = client.messages.create(
+        model="claude-sonnet-4-6",
+        max_tokens=1024,
+        system=DIRECTIVE_PLAN_SYSTEM,
+        messages=messages,
+    )
+    text = response.content[0].text.strip()
+    if text.startswith("```"):
+        text = text.split("\n", 1)[1].rsplit("```", 1)[0].strip()
+    try:
+        result = json.loads(text)
+        result["raw"] = text
+        return result
+    except Exception:
+        return {"vision": "", "resource": "", "risk": "",
+                "proposal": text, "constraint_summary": {},
+                "cascade_gaps": [], "values_alignment": None, "raw": text}
+
+
+def generate_initial_plan_proposal(
+    scope: str,
+    tasks: list[dict],
+    goals: list[dict],
+    parent_plan: dict,
+    values: dict,
+    budget_envelopes: list[dict],
+    period_start: str,
+    period_end: str,
+) -> dict:
+    """Generate initial directive plan proposal. Returns same structure as directive_boardroom_turn."""
+    context = _build_plan_context(
+        scope, tasks, goals, parent_plan, values, budget_envelopes, period_start, period_end
+    )
+    return directive_boardroom_turn(
+        scope=scope,
+        context=context,
+        user_message="Generate the initial plan proposal.",
+        history=[],
+        current_proposal="",
+    )
+
+
+def _build_plan_context(
+    scope: str,
+    tasks: list[dict],
+    goals: list[dict],
+    parent_plan: dict,
+    values: dict,
+    budget_envelopes: list[dict],
+    period_start: str,
+    period_end: str,
+) -> str:
+    lines = [
+        f"Period: {period_start} to {period_end} ({scope})",
+        f"Goals: {json.dumps([{'title': g.get('title'), 'dimension': g.get('dimension')} for g in goals[:10]], indent=2)}",
+        f"Tasks (active, due in period): {json.dumps([{'id': t.get('seq_id') or t.get('id'), 'title': t.get('title'), 'priority': t.get('priority'), 'due': t.get('due')} for t in tasks[:20]], indent=2)}",
+    ]
+    if parent_plan:
+        lines.append(f"Parent plan: {json.dumps(parent_plan, indent=2)[:800]}")
+    if values:
+        prayer = values.get("prayer", "")
+        if prayer:
+            lines.append(f"Prayer/values: {prayer[:200]}")
+    if budget_envelopes:
+        lines.append(f"Budget envelopes: {json.dumps(budget_envelopes[:5], indent=2)}")
+    return "\n\n".join(lines)

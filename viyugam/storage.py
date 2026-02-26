@@ -13,11 +13,11 @@ from typing import Any, Optional
 import yaml
 
 from viyugam.models import (
-    Task, Project, Goal, InboxItem, SomedayItem,
+    Task, Project, Goal, InboxItem, TriageItem, Note, SomedayItem,
     JournalSummary, SystemState, ViyugamConfig,
     TaskStatus, ResilienceState, CalendarEntry,
     SlowBurn, Milestone, Budget, Transaction, Decision, ActualRecord,
-    OKR, KeyResult, RecurringItem, TxType,
+    OKR, KeyResult, RecurringItem, TxType, Dimension,
 )
 
 
@@ -26,21 +26,29 @@ from viyugam.models import (
 HOME      = Path.home() / ".viyugam"
 DATA      = HOME / "data"
 JOURNALS  = HOME / "journals"
+JOURNAL   = HOME / "journal"    # new per-dimension journal dir
 RESEARCH  = HOME / "research"
+PLANS     = HOME / "plans"
 CONFIG_FILE   = HOME / "config.yaml"
 CALENDAR_FILE = DATA / "calendar.json"
+CALENDAR_ICS  = HOME / "calendar.ics"
 SLOW_BURNS_FILE  = DATA / "slow_burns.json"
 MILESTONES_FILE  = DATA / "milestones.json"
 BUDGETS_FILE     = DATA / "budgets.json"
+BUDGET_YAML      = HOME / "budget.yaml"
 TRANSACTIONS_FILE= DATA / "transactions.json"
 DECISIONS_FILE   = DATA / "decisions.json"
 ACTUALS_FILE     = DATA / "actuals.json"
 MEMORY_FILE      = HOME / "memory.json"
 CONSTITUTION_FILE= HOME / "constitution.md"
+VALUES_FILE      = HOME / "values.yaml"
 ENERGY_CACHE_FILE= DATA / "energy_pattern.json"
 OKRS_FILE        = DATA / "okrs.json"
 RECURRING_FILE   = DATA / "recurring.json"
 JOURNALS_DIR     = JOURNALS
+TRIAGE_FILE      = HOME / "triage.json"
+COUNTERS_FILE    = DATA / "counters.json"
+NOTES_FILE       = DATA / "notes.json"
 
 
 def ensure_dirs() -> None:
@@ -48,7 +56,9 @@ def ensure_dirs() -> None:
     HOME.mkdir(exist_ok=True)
     DATA.mkdir(exist_ok=True)
     JOURNALS.mkdir(exist_ok=True)
+    JOURNAL.mkdir(exist_ok=True)
     RESEARCH.mkdir(exist_ok=True)
+    PLANS.mkdir(exist_ok=True)
     for name in ("tasks", "projects", "goals", "inbox", "someday", "state"):
         path = DATA / f"{name}.json"
         if not path.exists():
@@ -57,9 +67,285 @@ def ensure_dirs() -> None:
         CALENDAR_FILE.write_text("[]")
     for fpath in (SLOW_BURNS_FILE, MILESTONES_FILE, BUDGETS_FILE,
                   TRANSACTIONS_FILE, DECISIONS_FILE, ACTUALS_FILE, OKRS_FILE,
-                  RECURRING_FILE):
+                  RECURRING_FILE, NOTES_FILE):
         if not fpath.exists():
             fpath.write_text("[]")
+    if not COUNTERS_FILE.exists():
+        COUNTERS_FILE.write_text("{}")
+    if not TRIAGE_FILE.exists():
+        _migrate_inbox_to_triage()
+    _ensure_pseudo_goals()
+
+
+# ── Sequential IDs ─────────────────────────────────────────────────────────────
+
+def _next_id(prefix: str) -> str:
+    """Return next sequential ID like T-001, G-002, P-003, N-004."""
+    counters = {}
+    if COUNTERS_FILE.exists():
+        text = COUNTERS_FILE.read_text().strip()
+        if text:
+            counters = json.loads(text)
+    n = counters.get(prefix, 0) + 1
+    counters[prefix] = n
+    COUNTERS_FILE.write_text(json.dumps(counters, indent=2))
+    return f"{prefix}-{n:03d}"
+
+
+# ── Triage (replaces inbox as primary capture) ─────────────────────────────────
+
+def _migrate_inbox_to_triage() -> None:
+    """One-time migration: copy inbox.json → triage.json with new fields."""
+    inbox_path = DATA / "inbox.json"
+    if inbox_path.exists():
+        try:
+            raw = json.loads(inbox_path.read_text().strip() or "[]")
+            migrated = []
+            for item in raw:
+                migrated.append({
+                    "id": item.get("id", ""),
+                    "content": item.get("content", ""),
+                    "source": item.get("source", "cli"),
+                    "processed": item.get("is_processed", False),
+                    "snooze_until": None,
+                    "boardroom_notes": None,
+                    "created_at": item.get("created_at", datetime.now().isoformat()),
+                })
+            TRIAGE_FILE.write_text(json.dumps(migrated, indent=2, ensure_ascii=False))
+            return
+        except Exception:
+            pass
+    TRIAGE_FILE.write_text("[]")
+
+
+def get_triage(unprocessed_only: bool = True) -> list[TriageItem]:
+    """Load triage items. Optionally filter out already-processed ones."""
+    if not TRIAGE_FILE.exists():
+        return []
+    raw = json.loads(TRIAGE_FILE.read_text().strip() or "[]")
+    items = [TriageItem(**i) for i in raw]
+    if unprocessed_only:
+        today = date.today().isoformat()
+        result = []
+        for item in items:
+            if item.processed:
+                continue
+            # Re-surface snoozed items if snooze_until has passed
+            if item.snooze_until and item.snooze_until > today:
+                continue
+            result.append(item)
+        return result
+    return items
+
+
+def append_triage(content: str, source: str = "cli") -> TriageItem:
+    """Append a new triage capture. Fast — no AI."""
+    item = TriageItem(content=content, source=source)
+    raw = json.loads(TRIAGE_FILE.read_text().strip() or "[]") if TRIAGE_FILE.exists() else []
+    raw.append(item.model_dump())
+    TRIAGE_FILE.write_text(json.dumps(raw, indent=2, ensure_ascii=False))
+    return item
+
+
+def save_triage_item(item: TriageItem) -> None:
+    raw = json.loads(TRIAGE_FILE.read_text().strip() or "[]") if TRIAGE_FILE.exists() else []
+    raw = [i for i in raw if i["id"] != item.id]
+    raw.append(item.model_dump())
+    TRIAGE_FILE.write_text(json.dumps(raw, indent=2, ensure_ascii=False))
+
+
+def mark_triage_processed(item_ids: list[str]) -> None:
+    raw = json.loads(TRIAGE_FILE.read_text().strip() or "[]") if TRIAGE_FILE.exists() else []
+    for item in raw:
+        if item["id"] in item_ids:
+            item["processed"] = True
+    TRIAGE_FILE.write_text(json.dumps(raw, indent=2, ensure_ascii=False))
+
+
+def get_recent_triage_logs(n: int = 5) -> list[TriageItem]:
+    """Last N triage captures regardless of processed state, newest first."""
+    if not TRIAGE_FILE.exists():
+        return []
+    raw = json.loads(TRIAGE_FILE.read_text().strip() or "[]")
+    items = [TriageItem(**i) for i in raw]
+    items.sort(key=lambda x: x.created_at, reverse=True)
+    return items[:n]
+
+
+# ── Pseudo-goals ───────────────────────────────────────────────────────────────
+
+def _ensure_pseudo_goals() -> None:
+    """Create ~maintenance and ~unplanned pseudo-goals if not present."""
+    raw = json.loads((DATA / "goals.json").read_text().strip() or "[]") if (DATA / "goals.json").exists() else []
+    titles = {g.get("title") for g in raw}
+    changed = False
+    for pseudo_title, dim in [("~maintenance", "health"), ("~unplanned", "career")]:
+        if pseudo_title not in titles:
+            goal = Goal(
+                title=pseudo_title,
+                dimension=Dimension(dim),
+                is_pseudo=True,
+            )
+            raw.append(goal.model_dump())
+            changed = True
+    if changed:
+        (DATA / "goals.json").write_text(json.dumps(raw, indent=2, ensure_ascii=False))
+
+
+# ── Values (values.yaml) ───────────────────────────────────────────────────────
+
+def load_values() -> dict:
+    """Load values.yaml. Returns {prayer: str, chapters: {dim: str}}."""
+    if VALUES_FILE.exists():
+        try:
+            data = yaml.safe_load(VALUES_FILE.read_text()) or {}
+            return data
+        except Exception:
+            pass
+    # Migrate from constitution.md if it exists
+    if CONSTITUTION_FILE.exists():
+        content = CONSTITUTION_FILE.read_text()
+        values = {
+            "prayer": "",
+            "chapters": {
+                "career": content,
+                "wealth": "",
+                "health": "",
+                "relationships": "",
+                "joy": "",
+                "learning": "",
+            },
+        }
+        VALUES_FILE.write_text(yaml.dump(values, allow_unicode=True, default_flow_style=False))
+        return values
+    return {"prayer": "", "chapters": {d: "" for d in ["career", "wealth", "health", "relationships", "joy", "learning"]}}
+
+
+def save_values(values: dict) -> None:
+    VALUES_FILE.write_text(yaml.dump(values, allow_unicode=True, default_flow_style=False))
+
+
+# ── Plans ──────────────────────────────────────────────────────────────────────
+
+def load_plan(scope: str) -> dict:
+    """Load plans/{scope}.json. scope = daily|weekly|monthly|quarterly."""
+    path = PLANS / f"{scope}.json"
+    if not path.exists():
+        return {}
+    try:
+        return json.loads(path.read_text())
+    except Exception:
+        return {}
+
+
+def save_plan(scope: str, plan: dict) -> Path:
+    path = PLANS / f"{scope}.json"
+    path.write_text(json.dumps(plan, indent=2, ensure_ascii=False))
+    return path
+
+
+# ── Notes ──────────────────────────────────────────────────────────────────────
+
+def get_notes() -> list[Note]:
+    raw = json.loads(NOTES_FILE.read_text().strip() or "[]") if NOTES_FILE.exists() else []
+    return [Note(**n) for n in raw]
+
+
+def save_note(note: Note) -> None:
+    if not note.seq_id:
+        note.seq_id = _next_id("N")
+    raw = json.loads(NOTES_FILE.read_text().strip() or "[]") if NOTES_FILE.exists() else []
+    raw = [n for n in raw if n["id"] != note.id]
+    raw.append(note.model_dump())
+    NOTES_FILE.write_text(json.dumps(raw, indent=2, ensure_ascii=False))
+
+
+# ── Period boundaries ──────────────────────────────────────────────────────────
+
+def period_start(scope: str, for_date: Optional[date] = None) -> date:
+    """Return start of the period containing for_date. Weeks start Sunday."""
+    d = for_date or date.today()
+    if scope == "daily":
+        return d
+    if scope == "weekly":
+        # Sunday = weekday 6, Monday = 0
+        dow = d.weekday()  # Mon=0 … Sun=6
+        days_since_sunday = (dow + 1) % 7
+        return d - timedelta(days=days_since_sunday)
+    if scope == "monthly":
+        return d.replace(day=1)
+    if scope == "quarterly":
+        q_start_month = ((d.month - 1) // 3) * 3 + 1
+        return d.replace(month=q_start_month, day=1)
+    return d
+
+
+def period_end(scope: str, for_date: Optional[date] = None) -> date:
+    """Return end of the period containing for_date (inclusive). Weeks end Saturday."""
+    import calendar as _cal
+    d = for_date or date.today()
+    if scope == "daily":
+        return d
+    if scope == "weekly":
+        start = period_start("weekly", d)
+        return start + timedelta(days=6)
+    if scope == "monthly":
+        last_day = _cal.monthrange(d.year, d.month)[1]
+        return d.replace(day=last_day)
+    if scope == "quarterly":
+        q_end_month = ((d.month - 1) // 3) * 3 + 3
+        last_day = _cal.monthrange(d.year, q_end_month)[1]
+        return d.replace(month=q_end_month, day=last_day)
+    return d
+
+
+def next_sunday(from_date: Optional[date] = None) -> date:
+    """Return the next Sunday (or today if today is Sunday)."""
+    d = from_date or date.today()
+    days_until_sunday = (6 - d.weekday()) % 7
+    if days_until_sunday == 0:
+        days_until_sunday = 7
+    return d + timedelta(days=days_until_sunday)
+
+
+# ── Mark entity done by seq_id ─────────────────────────────────────────────────
+
+def mark_entity_done(seq_id: str) -> Optional[str]:
+    """
+    Mark a Task/Goal/Project/Note done by its sequential ID (T-NNN etc).
+    Returns human-readable result string, or None if not found.
+    """
+    prefix = seq_id.split("-")[0].upper() if "-" in seq_id else ""
+
+    if prefix == "T":
+        tasks = get_tasks()
+        for t in tasks:
+            if t.seq_id == seq_id or t.seq_id == seq_id.upper():
+                t.status = TaskStatus.DONE
+                t.last_done = date.today().isoformat()
+                save_task(t)
+                return f"Task {seq_id} marked done: {t.title}"
+    elif prefix == "G":
+        goals = get_goals(active_only=False)
+        for g in goals:
+            if g.seq_id == seq_id or g.seq_id == seq_id.upper():
+                g.is_active = False
+                save_goal(g)
+                return f"Goal {seq_id} marked done: {g.title}"
+    elif prefix == "P":
+        from viyugam.models import ProjectStatus
+        projects = get_projects()
+        for p in projects:
+            if p.seq_id == seq_id or p.seq_id == seq_id.upper():
+                p.status = ProjectStatus.COMPLETED
+                save_project(p)
+                return f"Project {seq_id} marked done: {p.title}"
+    elif prefix == "N":
+        notes = get_notes()
+        for n in notes:
+            if n.seq_id == seq_id or n.seq_id == seq_id.upper():
+                return f"Note {seq_id} acknowledged: {n.title}"
+    return None
 
 
 # ── Config ─────────────────────────────────────────────────────────────────────
@@ -158,10 +444,14 @@ def get_task_by_id(task_id: str) -> Optional[Task]:
     for t in get_tasks():
         if t.id == task_id or t.id.startswith(task_id):
             return t
+        if t.seq_id and (t.seq_id == task_id or t.seq_id.upper() == task_id.upper()):
+            return t
     return None
 
 
 def save_task(task: Task) -> None:
+    if not task.seq_id:
+        task.seq_id = _next_id("T")
     raw = _load("tasks")
     existing = [t for t in raw if t["id"] != task.id]
     existing.append(task.model_dump())
@@ -191,6 +481,8 @@ def get_projects(status: Optional[str] = None) -> list[Project]:
 
 
 def save_project(project: Project) -> None:
+    if not project.seq_id:
+        project.seq_id = _next_id("P")
     raw = _load("projects")
     existing = [p for p in raw if p["id"] != project.id]
     existing.append(project.model_dump())
@@ -208,6 +500,8 @@ def get_goals(active_only: bool = True) -> list[Goal]:
 
 
 def save_goal(goal: Goal) -> None:
+    if not goal.seq_id and not goal.is_pseudo:
+        goal.seq_id = _next_id("G")
     raw = _load("goals")
     existing = [g for g in raw if g["id"] != goal.id]
     existing.append(goal.model_dump())
@@ -940,3 +1234,126 @@ def compute_coherence_score(config: "ViyugamConfig", days: int = 7) -> dict:
         narrative = f"Low coherence. Most energy went to '{top_dim}' ({breakdown.get(top_dim, 0)}%) while your stated season is '{focus_name}'. Worth examining."
 
     return {"score": total_score, "breakdown": breakdown, "narrative": narrative}
+
+
+# ── ICS Calendar Reader ────────────────────────────────────────────────────────
+
+def _parse_ics_datetime(val: str) -> Optional[datetime]:
+    """Parse iCalendar DTSTART/DTEND value to datetime."""
+    val = val.strip()
+    # Strip timezone id suffix like ;TZID=Asia/Kolkata
+    if ":" in val:
+        val = val.split(":")[-1]
+    for fmt in ("%Y%m%dT%H%M%SZ", "%Y%m%dT%H%M%S", "%Y%m%d"):
+        try:
+            return datetime.strptime(val, fmt)
+        except ValueError:
+            continue
+    return None
+
+
+def parse_ics(path: Optional[Path] = None) -> list[dict]:
+    """
+    Parse ~/.viyugam/calendar.ics (or provided path) into list of event dicts.
+    Each dict: {title, date, start_time, end_time, all_day}
+    Only returns VEVENT components. Minimal parser — no external deps.
+    """
+    ics_path = path or CALENDAR_ICS
+    if not ics_path.exists():
+        return []
+
+    events = []
+    try:
+        content = ics_path.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return []
+
+    # Split into VEVENT blocks
+    vevent_re = re.compile(r'BEGIN:VEVENT(.*?)END:VEVENT', re.DOTALL)
+    for match in vevent_re.finditer(content):
+        block = match.group(1)
+        props: dict[str, str] = {}
+        for line in block.splitlines():
+            line = line.strip()
+            if ":" in line:
+                key, _, val = line.partition(":")
+                # Normalize key (strip TZID params etc)
+                key = key.split(";")[0].strip().upper()
+                props[key] = val.strip()
+
+        summary = props.get("SUMMARY", "Untitled")
+        dtstart_raw = props.get("DTSTART", "")
+        dtend_raw = props.get("DTEND", "")
+
+        if not dtstart_raw:
+            continue
+
+        all_day = len(dtstart_raw.replace(":", "").replace("T", "").replace("Z", "").replace("-", "")) == 8
+        dt_start = _parse_ics_datetime(dtstart_raw)
+        dt_end = _parse_ics_datetime(dtend_raw) if dtend_raw else None
+
+        if not dt_start:
+            continue
+
+        events.append({
+            "title": summary,
+            "date": dt_start.date().isoformat(),
+            "start_time": dt_start.strftime("%H:%M") if not all_day else None,
+            "end_time": dt_end.strftime("%H:%M") if dt_end and not all_day else None,
+            "all_day": all_day,
+        })
+
+    # Sort by date then start_time
+    events.sort(key=lambda e: (e["date"], e["start_time"] or "00:00"))
+    return events
+
+
+def get_ics_events_for_period(start: date, end: date) -> list[dict]:
+    """Return ICS events in [start, end] date range."""
+    events = parse_ics()
+    start_str = start.isoformat()
+    end_str = end.isoformat()
+    return [e for e in events if start_str <= e["date"] <= end_str]
+
+
+# ── Budget YAML ────────────────────────────────────────────────────────────────
+
+def load_budget_yaml() -> dict:
+    """
+    Load budget.yaml. Structure:
+    {currency: str, envelopes: [{name, monthly_limit, category}]}
+    Migrates from data/budgets.json on first load if budget.yaml doesn't exist.
+    """
+    if BUDGET_YAML.exists():
+        try:
+            data = yaml.safe_load(BUDGET_YAML.read_text()) or {}
+            return data
+        except Exception:
+            pass
+
+    # Migrate from budgets.json
+    budget_data = {"currency": "₹", "envelopes": []}
+    if BUDGETS_FILE.exists():
+        try:
+            raw = json.loads(BUDGETS_FILE.read_text().strip() or "[]")
+            for b in raw:
+                budget_data["envelopes"].append({
+                    "name": b.get("name", ""),
+                    "monthly_limit": b.get("total_limit", 0),
+                    "category": b.get("dimension") or "general",
+                })
+        except Exception:
+            pass
+
+    BUDGET_YAML.write_text(yaml.dump(budget_data, allow_unicode=True, default_flow_style=False))
+    return budget_data
+
+
+def save_budget_yaml(data: dict) -> None:
+    BUDGET_YAML.write_text(yaml.dump(data, allow_unicode=True, default_flow_style=False))
+
+
+def get_budget_envelope_summary() -> list[dict]:
+    """Return [{name, monthly_limit, category}] from budget.yaml."""
+    data = load_budget_yaml()
+    return data.get("envelopes", [])

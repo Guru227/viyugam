@@ -203,7 +203,16 @@ def _build_strategic(focus: str) -> list[list]:
         slow_burns = storage.get_slow_burns()
         goals      = storage.get_goals(active_only=False)
         state      = storage.load_state()
-        constitution = storage.load_constitution()
+
+        # ── Prayer (from values.yaml — shown at top) ──
+        values = storage.load_values()
+        prayer = values.get("prayer", "")
+        if prayer:
+            for line in prayer.strip().splitlines()[:4]:
+                if line.strip():
+                    L(_t("accent", f"  {line[:48]}"))
+            lines.append(_div())
+            B()
 
         # ── Season ──
         if config.season:
@@ -214,8 +223,32 @@ def _build_strategic(focus: str) -> list[list]:
             L(_t("dim",    f"  Focus: {s.focus.value}{sec}"))
         else:
             L(_t("warn", "  No season — run 'setup'"))
+
+        # Days remaining in current quarter
+        today_d = date.today()
+        q_end = storage.period_end("quarterly", today_d)
+        days_left = (q_end - today_d).days
+        L(_t("dim", f"  Quarter ends in {days_left} days ({q_end.isoformat()})"))
         lines.append(_div())
         B()
+
+        # ── Season weights from plans/season_weights.json ──
+        season_weights_path = storage.PLANS / "season_weights.json"
+        if season_weights_path.exists():
+            try:
+                import json as _json
+                weights = _json.loads(season_weights_path.read_text())
+                if weights:
+                    L(_t("label", "  SEASON WEIGHTS"))
+                    for dim, pct in list(weights.items())[:6]:
+                        bar = _pct_bar(int(pct), width=10)
+                        row = [_t("dim", f"  {dim:<12} ")]
+                        row.extend(bar)
+                        row.append(_t("dim", f"  {pct}%"))
+                        lines.append(row)
+                    B()
+            except Exception:
+                pass
 
         # ── Dimension bars ──
         L(_t("label", "  DIMENSIONS  (14-day avg, 0–10)"))
@@ -247,17 +280,20 @@ def _build_strategic(focus: str) -> list[list]:
                 L(_t("dim", "    Log tasks to see dimension balance"))
         B()
 
-        # ── Active goals ──
-        active_goals   = [g for g in goals if getattr(g, "active", True)
+        # ── Active goals (G-NNN) ──
+        active_goals   = [g for g in goals if getattr(g, "is_active", True)
+                          and not getattr(g, "is_pseudo", False)
                           and _visible(g.dimension, focus)]
-        inactive_goals = [g for g in goals if not getattr(g, "active", True)
+        inactive_goals = [g for g in goals if not getattr(g, "is_active", True)
+                          and not getattr(g, "is_pseudo", False)
                           and _visible(g.dimension, focus)]
         L(_t("label", f"  GOALS  ({len(active_goals)} active)"))
         if active_goals:
             for g in active_goals[:10]:
                 dim = g.dimension.value if g.dimension else "—"
-                L(_t("todo", f"  ◆  {g.title[:36]:<36}  "),
-                  _t("dim",  dim))
+                seq = g.seq_id or "—"
+                L(_t("todo", f"  ◆  {g.title[:32]:<32}  "),
+                  _t("dim",  f"{seq}  {dim}"))
         else:
             L(_t("dim", "    No active goals"))
         B()
@@ -280,19 +316,8 @@ def _build_strategic(focus: str) -> list[list]:
             L(_t("dim", "    None — add long-horizon aspirations"))
         B()
 
-        # ── Constitution snippet ──
-        L(_t("label", "  CONSTITUTION"))
-        if constitution:
-            for row in constitution.strip().splitlines()[:4]:
-                if row.strip():
-                    L(_t("dim", f"  {row[:46]}"))
-        else:
-            L(_t("dim", "    Not set"))
-        B()
-
         # ── Review cadence ──
         L(_t("dim", f"  Last review:   {state.last_review or 'never'}"))
-        L(_t("dim", f"  Last think:    {state.last_think  or 'never'}"))
 
     except Exception as e:
         lines.append([_t("overdue", f"  Error: {e}")])
@@ -403,6 +428,30 @@ def _build_tactical(focus: str) -> list[list]:
                   _t("todo", f"{m.title[:30]}"))
             B()
 
+        # ── Weekly plan (from plans/weekly.json) ──
+        weekly_plan = storage.load_plan("weekly")
+        if weekly_plan.get("proposal"):
+            L(_t("label", "  WEEKLY PLAN"))
+            proposal = weekly_plan["proposal"]
+            if isinstance(proposal, list):
+                items = proposal[:5]
+            else:
+                items = [line.strip() for line in str(proposal).split("\n") if line.strip()][:5]
+            for item in items:
+                L(_t("dim", f"  ·  {item[:42]}"))
+            B()
+
+        # ── Budget summary ──
+        try:
+            envelopes = storage.get_budget_envelope_summary()
+            if envelopes:
+                L(_t("label", "  BUDGET"))
+                for env in envelopes[:4]:
+                    L(_t("dim", f"  {env.get('name',''):<16}  {env.get('monthly_limit',0):>8,.0f}"))
+                B()
+        except Exception:
+            pass
+
         L(_t("dim", f"  Last weekly review:  {state.last_review or 'never'}"))
 
     except Exception as e:
@@ -430,6 +479,7 @@ def _build_daily(focus: str, staging: bool) -> list[list]:
         all_tasks   = storage.get_tasks(include_habits=False)
         state       = storage.load_state()
         inbox       = storage.get_inbox(unprocessed_only=True)
+        triage_unprocessed = storage.get_triage(unprocessed_only=True)
 
         overdue = [
             t for t in all_tasks
@@ -439,9 +489,37 @@ def _build_daily(focus: str, staging: bool) -> list[list]:
         done_today = [t for t in tasks_today if t.status == TaskStatus.DONE]
         vis_today  = [t for t in tasks_today if _visible(t.dimension, focus)]
 
-        L(_t("accent", f"  {now.strftime('%A, %-d %b %Y')}  ·  {now.strftime('%H:%M')}"))
+        # Energy indicator from last journal
+        energy_str = ""
+        try:
+            ep = storage.get_energy_pattern()
+            if ep and ep.get("pattern_summary"):
+                energy_str = f"  ·  {ep['pattern_summary'][:30]}"
+        except Exception:
+            pass
+
+        # Re-entry detection
+        reentry_str = ""
+        if state.last_log:
+            days_away = (date.today() - date.fromisoformat(state.last_log)).days
+            if days_away >= 3:
+                reentry_str = f"  [dim]last log: {days_away}d ago[/dim]"
+
+        L(_t("accent", f"  {now.strftime('%A, %-d %b %Y')}  ·  {now.strftime('%H:%M')}{energy_str}"))
+        if reentry_str:
+            L(_t("warn", f"  Away {days_away} days — consider a quick replan"))
         lines.append(_div())
         B()
+
+        # ── Today's daily plan ──
+        daily_plan = storage.load_plan("daily")
+        if daily_plan.get("proposal") and not tasks_today:
+            L(_t("label", "  TODAY'S PLAN"))
+            proposal = daily_plan["proposal"]
+            items = [line.strip() for line in str(proposal).split("\n") if line.strip()][:5]
+            for item in items:
+                L(_t("dim", f"  ·  {item[:42]}"))
+            B()
 
         # ── Staging banner ──
         if staging:
@@ -522,9 +600,34 @@ def _build_daily(focus: str, staging: bool) -> list[list]:
                 L(_t("dim", f"  ·  {t.title[:40]}"))
             B()
 
+        # ── Due soon ──
+        soon_cutoff = (date.today() + timedelta(days=2)).isoformat()
+        due_soon = [
+            t for t in all_tasks
+            if t.due and t.due <= soon_cutoff
+            and t.status not in (TaskStatus.DONE,)
+        ]
+        if due_soon:
+            L(_t("label", f"  DUE SOON ({len(due_soon)})"))
+            for t in sorted(due_soon, key=lambda x: x.due or "")[:4]:
+                seq = f"[{t.seq_id}]  " if t.seq_id else ""
+                L(_t("warn", f"  !  {seq}{t.title[:32]:<32}"),
+                  _t("dim",  f"  {t.due}"))
+            B()
+
+        # ── Recent triage logs ──
+        try:
+            triage_items = storage.get_recent_triage_logs(5)
+            triage_sty = "warn" if triage_unprocessed else "dim"
+            L(_t(triage_sty, f"  Triage: {len(triage_unprocessed)} unprocessed"))
+            if triage_items:
+                for item in triage_items[:3]:
+                    L(_t("dim", f"  ·  {item.content[:40]}"))
+            B()
+        except Exception:
+            pass
+
         # ── Footer ──
-        inbox_sty = "warn" if inbox else "dim"
-        L(_t(inbox_sty, f"  Inbox: {len(inbox)} unprocessed"))
         L(_t("dim", f"  Last plan: {state.last_plan or 'never'}   "
                     f"Streak: {state.current_streak}d"))
 
@@ -602,6 +705,22 @@ def _sanitize_ansi(text: str) -> str:
     return _CURSOR_RE.sub('', text)
 
 
+class _NullStdin:
+    """Drop-in stdin replacement that raises EOFError immediately.
+
+    Prevents background threads from calling Python's built-in input() and
+    pulling the terminal out of prompt_toolkit's raw mode.
+    """
+    def readline(self):
+        raise EOFError("dashboard: non-interactive")
+    def read(self, n=-1):
+        raise EOFError("dashboard: non-interactive")
+    def isatty(self):
+        return False
+    def fileno(self):
+        raise io.UnsupportedOperation("fileno")
+
+
 # ── Rich output capture ────────────────────────────────────────────────────────
 
 @contextlib.contextmanager
@@ -620,17 +739,25 @@ def _capture_rich(width: int = 60):
         soft_wrap=True,
     )
     # Prevent Prompt.ask() / Confirm.ask() from blocking stdin in a background
-    # thread.  Returning "" causes Rich's Prompt to use its declared default.
-    cap.input = lambda prompt="": ""
+    # thread.  The lambda previously used was missing keyword-only args, causing
+    # TypeError that let the real console.input() run and corrupt the terminal.
+    def _no_input(prompt="", *, markup=True, emoji=True, password=False, stream=None):
+        raise EOFError("dashboard: non-interactive")
+    cap.input = _no_input
 
     old = {}
     for mod in (_m, _r):
         if hasattr(mod, "console"):
             old[mod] = mod.console
             mod.console = cap
+
+    import sys as _sys
+    old_stdin = _sys.stdin
+    _sys.stdin = _NullStdin()
     try:
         yield buf
     finally:
+        _sys.stdin = old_stdin
         for mod, c in old.items():
             mod.console = c
 
@@ -695,6 +822,8 @@ def _run_plan_bg(state: _State, app: Application, chat_width: int) -> None:
         output = _sanitize_ansi(buf.getvalue())
     except Exception as e:
         output = f"Plan error: {e}"
+    finally:
+        state.running = False
 
     if state.chat and state.chat[-1].get("text") == "Planning your day…":
         state.chat.pop()
@@ -709,7 +838,6 @@ def _run_plan_bg(state: _State, app: Application, chat_width: int) -> None:
         "role": "system",
         "text": "Plan staged in Daily panel. Type 'approve' to confirm.",
     })
-    state.running = False
     state.scroll_r = max(0, _count_chat_lines(state.chat) - 20)
     app.invalidate()
 
@@ -723,6 +851,7 @@ def _run_research_bg(
     """Run research in background, update job dict when done."""
     from viyugam.main import cmd_research
 
+    state.running = True
     start = time.time()
     try:
         with _capture_rich(width=80) as buf:
@@ -737,6 +866,7 @@ def _run_research_bg(
         job["error"]  = str(e)
     finally:
         job["elapsed"] = int(time.time() - start)
+        state.running = False
 
     state.panel = 3  # switch to Research panel
     state.chat.append({
@@ -749,6 +879,7 @@ def _run_research_bg(
 # ── Ticker thread (elapsed time + spinner) ────────────────────────────────────
 
 def _ticker_thread(state: _State, app: Application, stop: threading.Event) -> None:
+    _reentry_checked = False
     while not stop.is_set():
         time.sleep(1)
         state.tick += 1
@@ -756,6 +887,26 @@ def _ticker_thread(state: _State, app: Application, stop: threading.Event) -> No
             if job["status"] == "running":
                 job["elapsed"] = job.get("elapsed", 0) + 1
                 job["tick"]    = state.tick
+
+        # Re-entry detection (check once per session, on first tick)
+        if not _reentry_checked and state.tick == 2:
+            _reentry_checked = True
+            try:
+                sys_state = storage.load_state()
+                if sys_state.last_log:
+                    days_away = (date.today() - date.fromisoformat(sys_state.last_log)).days
+                    if days_away >= 3 and not state.running:
+                        state.chat.append({
+                            "role": "system",
+                            "text": (
+                                f"Welcome back. You've been away {days_away} days. "
+                                f"Want to run a quick weekly replan? Type 'plan week'."
+                            ),
+                        })
+                        state.scroll_r = max(0, _count_chat_lines(state.chat) - 20)
+            except Exception:
+                pass
+
         app.invalidate()
 
 
