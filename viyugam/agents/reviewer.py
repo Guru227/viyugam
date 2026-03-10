@@ -249,6 +249,15 @@ def generate_briefing(
     if decisions_for_review:
         extra_context += f"\nPENDING DECISIONS FOR REVIEW: {len(decisions_for_review)}\n"
 
+    # GPS engine context: goal trajectories and nudges
+    try:
+        from viyugam.priority import format_context_for_prompt
+        gps_text = format_context_for_prompt()
+        if gps_text:
+            extra_context += "\n" + gps_text + "\n"
+    except Exception:
+        pass
+
     content = redact(review_data) + extra_context
 
     response = client.messages.create(
@@ -327,7 +336,18 @@ def generate_review_summary(
     text = response.content[0].text.strip()
     if text.startswith("```"):
         text = text.split("\n", 1)[1].rsplit("```", 1)[0].strip()
-    return json.loads(text)
+    summary = json.loads(text)
+
+    # GPS Pattern Learning: feed key_insights into the pattern store
+    try:
+        import viyugam.storage as _storage
+        for insight in summary.get("key_insights", []):
+            if insight and len(insight) > 5:
+                _storage.merge_pattern(insight, source="review")
+    except Exception:
+        pass
+
+    return summary
 
 
 WEEKLY_LETTER_SYSTEM = """You are writing a personal weekly letter to the user — from the perspective of a wise, honest mentor who has been watching their week unfold.
@@ -487,6 +507,17 @@ Rules:
 - Be direct, not validating.
 - Reference actual data (planned tasks vs completed, triage logs).
 - One key question to open. When user says 'next', reply with [PHASE_COMPLETE] on its own line.
+
+After each response (except the very first opening), append a PLAN_STATE block summarising what has been surfaced in the retro so far:
+
+PLAN_STATE:
++ Insight: task completion 2/5 — 40% rate
++ Pattern: GCC deferred 3 days running
+= Context: Samarthyam has external deadline
+- Dropped: "I was productive" — data says otherwise
+
+Use + for new insights or patterns surfaced, = for stable context, - for assumptions debunked or tasks that didn't happen.
+Update the block each turn to reflect cumulative retro findings, not just the latest message.
 """
 
 
@@ -503,7 +534,7 @@ def retro_turn(
     messages.append({"role": "user", "content": redact(user_message)})
     response = client.messages.create(
         model="claude-sonnet-4-6",
-        max_tokens=512,
+        max_tokens=800,
         system=system,
         messages=messages,
     )
@@ -520,7 +551,7 @@ Use the lens of {dimension} to reflect on this period.
 Prompt the user with one focused question about their {dimension} life.
 When user says 'next' or 'skip', write [PHASE_COMPLETE] on its own line.
 Keep responses concise (≤120 words).
-"""
+{prior_context}"""
 
 
 def dim_journal_turn(
@@ -528,10 +559,21 @@ def dim_journal_turn(
     user_message: str,
     dimension: str,
     scope: str,
+    prior_summaries: dict | None = None,
 ) -> tuple[str, bool]:
     """One turn of per-dimension journal. Returns (response, is_complete)."""
     client = _client()
-    system = DIM_JOURNAL_SYSTEM.format(dimension=dimension, scope=scope)
+    prior_context = ""
+    if prior_summaries:
+        relevant = {k: v for k, v in prior_summaries.items() if v != "skipped"}
+        if relevant:
+            lines = ["\nContext from earlier dimensions in this session (use to make connections):"]
+            for dim, summary in relevant.items():
+                lines.append(f"- {dim}: {summary[:200]}")
+            prior_context = "\n".join(lines)
+    system = DIM_JOURNAL_SYSTEM.format(
+        dimension=dimension, scope=scope, prior_context=prior_context
+    )
     messages = list(history)
     messages.append({"role": "user", "content": redact(user_message)})
     response = client.messages.create(
@@ -560,3 +602,62 @@ def synthesize_dim_journal(history: list[dict], dimension: str, scope: str, toda
         messages=[{"role": "user", "content": f"Date: {today}\nConversation:\n{history_text}"}],
     )
     return response.content[0].text.strip()
+
+
+def extract_review_tasks(dim_summaries: dict) -> dict:
+    """Extract new tasks and completed hints from dimension journal summaries.
+
+    Returns dict with keys:
+      new_tasks: list[str]       — action items or commitments mentioned
+      completed_hints: list[str] — things mentioned as already done
+    """
+    if not dim_summaries:
+        return {"new_tasks": [], "completed_hints": []}
+
+    client = _client()
+    combined = "\n\n".join(
+        f"[{dim.upper()}]\n{summary}"
+        for dim, summary in dim_summaries.items()
+        if summary and summary != "skipped"
+    )
+    if not combined.strip():
+        return {"new_tasks": [], "completed_hints": []}
+
+    system = """You extract action items and completed work from journal summaries.
+
+Return ONLY a JSON object with two keys:
+{
+  "new_tasks": ["task 1", "task 2"],
+  "completed_hints": ["thing done 1", "thing done 2"]
+}
+
+new_tasks: concrete action items, commitments, or intentions the person mentioned they want to do.
+completed_hints: things they mentioned they already finished or accomplished.
+
+Rules:
+- Only include specific, actionable items (not vague goals)
+- Max 6 new tasks, max 4 completed hints
+- Keep each item short (under 60 chars)
+- If nothing found, return empty lists
+- Return ONLY the JSON object, no other text"""
+
+    try:
+        response = client.messages.create(
+            model="claude-sonnet-4-6",
+            max_tokens=400,
+            system=system,
+            messages=[{"role": "user", "content": f"Journal summaries:\n\n{combined}"}],
+        )
+        text = response.content[0].text.strip()
+        # Strip markdown code fences if present
+        if text.startswith("```"):
+            text = text.split("```")[1]
+            if text.startswith("json"):
+                text = text[4:]
+        data = json.loads(text)
+        return {
+            "new_tasks": [str(t) for t in data.get("new_tasks", [])[:6]],
+            "completed_hints": [str(t) for t in data.get("completed_hints", [])[:4]],
+        }
+    except Exception:
+        return {"new_tasks": [], "completed_hints": []}

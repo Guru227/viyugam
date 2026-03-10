@@ -148,6 +148,17 @@ def chat_turn(
     if memory_context:
         system += f"\n\n{memory_context}"
 
+    # GPS: append precipitated patterns
+    try:
+        import viyugam.storage as _storage
+        precipitated = _storage.get_patterns(precipitated_only=True)
+        if precipitated:
+            system += "\n\nPRECIPITATED PATTERNS (stable observations, 3+ sessions):"
+            for p in precipitated[:6]:
+                system += f"\n- {p.pattern} (seen {p.occurrences} times)"
+    except Exception:
+        pass
+
     messages = history + [{"role": "user", "content": redact(user_message)}]
 
     response = client.messages.create(
@@ -193,7 +204,18 @@ def generate_summary(conversation: list[dict], today: str,
     if text.startswith("```"):
         text = text.split("\n", 1)[1].rsplit("```", 1)[0].strip()
 
-    return json.loads(text)
+    summary = json.loads(text)
+
+    # GPS Pattern Learning: feed patterns_noted into the pattern store
+    try:
+        import viyugam.storage as _storage
+        for pattern_text in summary.get("patterns_noted", []):
+            if pattern_text and len(pattern_text) > 5:
+                _storage.merge_pattern(pattern_text, source="journal")
+    except Exception:
+        pass
+
+    return summary
 
 
 def format_journal_markdown(

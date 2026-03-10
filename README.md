@@ -1,5 +1,7 @@
 # வியூகம் · Viyugam
 
+![Lint](badges/lint.svg) ![Type Check](badges/typecheck.svg) ![Security](badges/security.svg) ![Dependencies](badges/deps.svg) ![Complexity](badges/complexity.svg) ![Docs](badges/docs.svg) ![Dead Code](badges/deadcode.svg) ![Coverage](badges/coverage.svg) ![Func Length](badges/funcmetrics.svg)
+
 **A personal Life OS — text-only, Claude-powered.**
 
 Viyugam (Tamil for "strategy/formation") is a command-line tool that acts as a personal life operating system. It helps you capture, plan, reflect, decide, and review — driven by AI, stored entirely on your machine.

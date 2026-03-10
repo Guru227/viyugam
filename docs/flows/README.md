@@ -29,6 +29,10 @@
 ## Docs
 
 - [Architecture](architecture.md) — system components, storage, dashboard panels, threading model
+- [GPS Engine](gps.md) — priority engine, constraint scoring, GPS panel, `get_context()`
+- [Nudges](nudges.md) — nudge lifecycle: compute → surface → dismiss → recompute
+- [Patterns](patterns.md) — pattern extraction, merging, precipitation, prompt integration
+- [Cadence Loops](cadence-loops.md) — the three feedback loops, rolling quarterly, unclosed gaps
 - [Log](log.md) — triage capture and task completion
 - [Plan](plan.md) — rapid replan: triage + directive boardroom
 - [Review](review.md) — full laminar cycle: retrospective · journal · Socratic · cascade · plan

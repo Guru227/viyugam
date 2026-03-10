@@ -254,6 +254,16 @@ def plan_day(
                 t += f"–{e['end_time']}"
             calendar_context += f"  - {e.get('title', 'Untitled')}{t} [{e.get('entry_type', 'event')}]\n"
 
+    # GPS engine context
+    gps_section = ""
+    try:
+        from viyugam.priority import format_context_for_prompt
+        gps_text = format_context_for_prompt()
+        if gps_text:
+            gps_section = "\n" + gps_text + "\n"
+    except Exception:
+        pass
+
     user_content = f"""TODAY: {today}
 PLANNING MODE: {mode.upper()}
 CURRENT TIME: {current_time}
@@ -261,7 +271,7 @@ DAY START HOUR: {config.get('day_start', 10):02d}:00
 USER: {config.get('user_name', 'friend')}
 Work hours cap: {config.get('work_hours_cap', 8)}h
 {season_info}{energy_section}
-{schedule_context}{calendar_context}{catch_up_section}{constitution_section}{memory_section}
+{schedule_context}{calendar_context}{catch_up_section}{constitution_section}{memory_section}{gps_section}
 TASKS DUE TODAY OR OVERDUE (remaining):
 {json.dumps(tasks, indent=2) if tasks else "None scheduled yet."}
 
@@ -305,8 +315,12 @@ Return ONLY a JSON object — no other text:
   "due": "YYYY-MM-DD or null",
   "estimated_minutes": 15-480,
   "energy_cost": 1-10,
-  "initial_draft": "Brief 1-2 sentence framing of this item for discussion"
-}"""
+  "initial_draft": "Brief 1-2 sentence framing of this item for discussion",
+  "aligns_to_goals": ["goal_id or seq_id if this clearly serves a goal"],
+  "might_block": ["task_id or seq_id if this might block another task"]
+}
+
+GOALS and TASKS lists may be provided in context — use them to suggest relationships."""
 
 
 def classify_item(content: str, context: str = "") -> dict:
@@ -422,8 +436,18 @@ For each turn return ONLY a JSON object:
   "proposal": "Current working plan proposal (3-5 bullet points)",
   "constraint_summary": {"time_used": 0, "time_total": 0, "budget_used": 0, "budget_total": 0},
   "cascade_gaps": ["list of parent-goal items not covered by current tasks"],
-  "values_alignment": "Brief note on values alignment (or null)"
-}"""
+  "values_alignment": "Brief note on values alignment (or null)",
+  "canvas_items": [
+    {"op": "+", "text": "item being added or newly emphasised"},
+    {"op": "-", "text": "item being removed or deprioritised"},
+    {"op": "=", "text": "item carried forward unchanged"}
+  ]
+}
+
+canvas_items represents the live working plan as line-level changes.
+Use op='+' for new or promoted items, op='-' for dropped items, op='=' for stable items.
+Include all items currently in the proposal — not just changed ones.
+If nothing changed from the previous turn, repeat the same items with op='='."""
 
 
 def directive_boardroom_turn(
@@ -471,10 +495,12 @@ def generate_initial_plan_proposal(
     budget_envelopes: list[dict],
     period_start: str,
     period_end: str,
+    okrs: list[dict] | None = None,
 ) -> dict:
     """Generate initial directive plan proposal. Returns same structure as directive_boardroom_turn."""
     context = _build_plan_context(
-        scope, tasks, goals, parent_plan, values, budget_envelopes, period_start, period_end
+        scope, tasks, goals, parent_plan, values, budget_envelopes, period_start, period_end,
+        okrs=okrs,
     )
     return directive_boardroom_turn(
         scope=scope,
@@ -494,12 +520,29 @@ def _build_plan_context(
     budget_envelopes: list[dict],
     period_start: str,
     period_end: str,
+    okrs: list[dict] | None = None,
 ) -> str:
+    import datetime as _dt
     lines = [
+        f"Today: {_dt.date.today().isoformat()}",
         f"Period: {period_start} to {period_end} ({scope})",
         f"Goals: {json.dumps([{'title': g.get('title'), 'dimension': g.get('dimension')} for g in goals[:10]], indent=2)}",
         f"Tasks (active, due in period): {json.dumps([{'id': t.get('seq_id') or t.get('id'), 'title': t.get('title'), 'priority': t.get('priority'), 'due': t.get('due')} for t in tasks[:20]], indent=2)}",
     ]
+    if okrs:
+        okr_lines = []
+        for o in okrs[:6]:
+            obj = o.get("objective", "")
+            dim = o.get("dimension") or ""
+            krs = o.get("key_results", [])
+            kr_text = "; ".join(
+                kr.get("text", "") for kr in krs if not kr.get("is_done")
+            )
+            okr_lines.append(f"  [{dim}] {obj}" + (f" → {kr_text}" if kr_text else ""))
+        lines.append(
+            "Active OKRs (use these as the constraint — weekly priorities should "
+            "visibly serve at least one OKR):\n" + "\n".join(okr_lines)
+        )
     if parent_plan:
         lines.append(f"Parent plan: {json.dumps(parent_plan, indent=2)[:800]}")
     if values:

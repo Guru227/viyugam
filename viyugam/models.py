@@ -42,6 +42,11 @@ class ResilienceState(str, Enum):
     DRIFT      = "drift"
     BANKRUPTCY = "bankruptcy"
 
+class Trajectory(str, Enum):
+    ON_TRACK  = "on_track"
+    AT_RISK   = "at_risk"
+    OFF_TRACK = "off_track"
+
 
 # ── Core entities ──────────────────────────────────────────────────────────────
 
@@ -72,6 +77,12 @@ class Task(BaseModel):
     boardroom_notes:    Optional[str] = None
     snooze_until:       Optional[str] = None   # YYYY-MM-DD
     seq_id:             Optional[str] = None   # T-NNN sequential display ID
+    # GPS engine fields
+    blocks:             list[str]       = []      # IDs of tasks this blocks
+    aligns_to:          list[str]       = []      # goal IDs this serves
+    snooze_count:       int             = 0       # times snoozed (for nudges)
+    constraint_score:   Optional[float] = None    # computed by engine
+    ai_priority_score:  Optional[float] = None    # composite score
 
 
 class Project(BaseModel):
@@ -97,6 +108,10 @@ class Goal(BaseModel):
     is_active:   bool       = True
     is_pseudo:   bool       = False   # True for ~maintenance, ~unplanned
     created_at:  str        = Field(default_factory=lambda: datetime.now().isoformat())
+    # GPS engine fields
+    trajectory:      Optional[Trajectory] = None
+    bottleneck_task: Optional[str]   = None    # task ID blocking this goal
+    progress_pct:    float           = 0.0     # computed from aligned tasks
 
 
 class InboxItem(BaseModel):
@@ -115,6 +130,8 @@ class TriageItem(BaseModel):
     processed:       bool          = False
     snooze_until:    Optional[str] = None   # YYYY-MM-DD
     boardroom_notes: Optional[str] = None
+    entity_type:     Optional[str] = None   # "task"|"project"|"goal"|"note"
+    parent_id:       Optional[str] = None   # ID of linked project or goal
     created_at:      str           = Field(default_factory=lambda: datetime.now().isoformat())
 
 
@@ -248,6 +265,19 @@ class ActualRecord(BaseModel):
     created_at:      str           = Field(default_factory=lambda: datetime.now().isoformat())
 
 
+class ProjectPlan(BaseModel):
+    """Structured scope document for a project — lives alongside the project."""
+    id:               str        = Field(default_factory=new_id)
+    project_id:       str
+    scope_md:         str        = ""       # free-form markdown scope narrative
+    success_criteria: list[str]  = []       # "done when..." bullets
+    out_of_scope:     list[str]  = []       # explicit exclusions
+    total_budget:     float      = 0.0
+    notes:            str        = ""       # constraints, risks, context
+    created_at:       str        = Field(default_factory=lambda: datetime.now().isoformat())
+    updated_at:       str        = Field(default_factory=lambda: datetime.now().isoformat())
+
+
 class KeyResult(BaseModel):
     id:      str  = Field(default_factory=new_id)
     text:    str
@@ -329,3 +359,48 @@ class SystemState(BaseModel):
     last_think:       Optional[str]   = None   # YYYY-MM-DD
     current_streak:   int             = 0
     actual_season:    Optional[str]   = None   # derived, updated by plan/review
+
+
+# ── GPS Engine models ─────────────────────────────────────────────────────────
+
+class NudgeType(str, Enum):
+    DEADLINE      = "deadline"
+    STREAK        = "streak"
+    SNOOZE        = "snooze"
+    GOAL_RISK     = "goal_risk"
+    BUDGET_DRIFT  = "budget_drift"
+    STALE_TASK    = "stale_task"
+    SEASON_DRIFT  = "season_drift"
+
+
+class Nudge(BaseModel):
+    id:           str           = Field(default_factory=new_id)
+    nudge_type:   NudgeType
+    entity_id:    str
+    message:      str
+    severity:     Literal["info", "warn", "critical"] = "info"
+    surfaced_at:  str           = Field(default_factory=lambda: datetime.now().isoformat())
+    dismissed:    bool          = False
+    created_at:   str           = Field(default_factory=lambda: datetime.now().isoformat())
+
+
+class PatternInsight(BaseModel):
+    id:            str           = Field(default_factory=new_id)
+    pattern:       str
+    occurrences:   int           = 1
+    source:        str           = "system"   # journal | review | coach | system
+    precipitated:  bool          = False      # True when occurrences >= 3
+    first_seen:    str           = Field(default_factory=lambda: datetime.now().isoformat())
+    last_seen:     str           = Field(default_factory=lambda: datetime.now().isoformat())
+    tags:          list[str]     = []
+
+
+class PriorityContext(BaseModel):
+    """Ephemeral computation result — never persisted."""
+    directive_task:    Optional[dict] = None
+    why_bottleneck:    str           = ""
+    unblocks:          list[str]     = []
+    nudges:            list[Nudge]   = []
+    goal_trajectories: list[dict]    = []
+    energy_fit:        str           = ""
+    computed_at:       str           = Field(default_factory=lambda: datetime.now().isoformat())

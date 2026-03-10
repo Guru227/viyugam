@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# Pre-commit hook: regenerate quality reports and badges.
+# Staged badge SVGs ride along with the commit so they're always current.
+#
+# Install: make install-hooks
+# Skip once: git commit --no-verify
+
+set -e
+
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+cd "$REPO_ROOT"
+
+echo "==> Running quality checks..."
+make report badges 2>&1 | tail -15
+
+# Auto-stage any badge changes so they're included in this commit
+if [ -d badges ]; then
+    git add badges/*.svg 2>/dev/null || true
+fi
+
+echo "==> Badges updated and staged."

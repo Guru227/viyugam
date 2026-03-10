@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import threading
 from datetime import datetime, date, timedelta
 from pathlib import Path
 from typing import Any, Optional
@@ -17,7 +18,8 @@ from viyugam.models import (
     JournalSummary, SystemState, ViyugamConfig,
     TaskStatus, ResilienceState, CalendarEntry,
     SlowBurn, Milestone, Budget, Transaction, Decision, ActualRecord,
-    OKR, KeyResult, RecurringItem, TxType, Dimension,
+    OKR, KeyResult, RecurringItem, TxType, Dimension, ProjectPlan,
+    Nudge, NudgeType, PatternInsight,
 )
 
 
@@ -44,11 +46,15 @@ CONSTITUTION_FILE= HOME / "constitution.md"
 VALUES_FILE      = HOME / "values.yaml"
 ENERGY_CACHE_FILE= DATA / "energy_pattern.json"
 OKRS_FILE        = DATA / "okrs.json"
+PROJECT_PLANS_FILE = DATA / "project_plans.json"
 RECURRING_FILE   = DATA / "recurring.json"
 JOURNALS_DIR     = JOURNALS
 TRIAGE_FILE      = HOME / "triage.json"
 COUNTERS_FILE    = DATA / "counters.json"
 NOTES_FILE       = DATA / "notes.json"
+NUDGES_FILE      = DATA / "nudges.json"
+PATTERNS_FILE    = DATA / "patterns.json"
+SESSIONS_DIR     = HOME / "sessions"
 
 
 def ensure_dirs() -> None:
@@ -59,6 +65,7 @@ def ensure_dirs() -> None:
     JOURNAL.mkdir(exist_ok=True)
     RESEARCH.mkdir(exist_ok=True)
     PLANS.mkdir(exist_ok=True)
+    SESSIONS_DIR.mkdir(exist_ok=True)
     for name in ("tasks", "projects", "goals", "inbox", "someday", "state"):
         path = DATA / f"{name}.json"
         if not path.exists():
@@ -67,7 +74,8 @@ def ensure_dirs() -> None:
         CALENDAR_FILE.write_text("[]")
     for fpath in (SLOW_BURNS_FILE, MILESTONES_FILE, BUDGETS_FILE,
                   TRANSACTIONS_FILE, DECISIONS_FILE, ACTUALS_FILE, OKRS_FILE,
-                  RECURRING_FILE, NOTES_FILE):
+                  RECURRING_FILE, NOTES_FILE, PROJECT_PLANS_FILE,
+                  NUDGES_FILE, PATTERNS_FILE):
         if not fpath.exists():
             fpath.write_text("[]")
     if not COUNTERS_FILE.exists():
@@ -324,7 +332,20 @@ def mark_entity_done(seq_id: str) -> Optional[str]:
                 t.status = TaskStatus.DONE
                 t.last_done = date.today().isoformat()
                 save_task(t)
-                return f"Task {seq_id} marked done: {t.title}"
+                result = f"Task {seq_id} marked done: {t.title}"
+                # GPS cascade: recompute project progress
+                if t.project_id:
+                    project_stats(t.project_id)  # triggers fresh computation
+                # GPS cascade: recompute goal progress for aligned goals
+                for gid in t.aligns_to:
+                    pct = _recompute_goal_progress(gid)
+                    if pct is not None:
+                        result += f"\n  Goal progress updated: {pct:.0f}%"
+                # GPS cascade: check for newly unblocked tasks
+                unblocked = _check_unblocked(t.id)
+                if unblocked:
+                    result += "\n  Unblocked: " + ", ".join(unblocked)
+                return result
     elif prefix == "G":
         goals = get_goals(active_only=False)
         for g in goals:
@@ -580,6 +601,9 @@ def load_journal(for_date: Optional[str] = None) -> Optional[str]:
 def save_journal(content: str, for_date: Optional[str] = None) -> Path:
     path = journal_path(for_date)
     path.write_text(content)
+    # Trigger energy pattern re-analysis in the background after each log write.
+    # get_energy_pattern handles its own 3-day staleness check — no wasted API calls.
+    threading.Thread(target=get_energy_pattern, daemon=True).start()
     return path
 
 
@@ -806,6 +830,178 @@ def get_nudges(state: SystemState) -> list[str]:
     return nudges
 
 
+# ── Nudge persistence (GPS engine) ────────────────────────────────────────────
+
+def get_stored_nudges() -> list[dict]:
+    """Load all stored nudges (including dismissed)."""
+    if not NUDGES_FILE.exists():
+        return []
+    text = NUDGES_FILE.read_text().strip()
+    return json.loads(text) if text else []
+
+
+def save_nudge(nudge: Nudge) -> None:
+    """Save or update a nudge by id."""
+    raw = get_stored_nudges()
+    raw = [n for n in raw if n["id"] != nudge.id]
+    raw.append(nudge.model_dump())
+    NUDGES_FILE.write_text(json.dumps(raw, indent=2, ensure_ascii=False))
+
+
+def dismiss_nudge(entity_id: str, nudge_type: str) -> bool:
+    """Mark a nudge as dismissed. Returns True if found."""
+    raw = get_stored_nudges()
+    found = False
+    for n in raw:
+        if n.get("entity_id") == entity_id and n.get("nudge_type") == nudge_type:
+            n["dismissed"] = True
+            found = True
+    if found:
+        NUDGES_FILE.write_text(json.dumps(raw, indent=2, ensure_ascii=False))
+    else:
+        # Store a dismissed marker even if no active nudge exists
+        marker = Nudge(
+            nudge_type=NudgeType(nudge_type) if nudge_type in NudgeType.__members__.values() else NudgeType.STALE_TASK,
+            entity_id=entity_id,
+            message="dismissed",
+            dismissed=True,
+        )
+        raw.append(marker.model_dump())
+        NUDGES_FILE.write_text(json.dumps(raw, indent=2, ensure_ascii=False))
+        found = True
+    return found
+
+
+# ── Pattern persistence (GPS engine) ──────────────────────────────────────────
+
+def get_patterns(precipitated_only: bool = False) -> list[PatternInsight]:
+    """Load pattern insights."""
+    if not PATTERNS_FILE.exists():
+        return []
+    text = PATTERNS_FILE.read_text().strip()
+    raw = json.loads(text) if text else []
+    patterns = [PatternInsight(**p) for p in raw]
+    if precipitated_only:
+        patterns = [p for p in patterns if p.precipitated]
+    return patterns
+
+
+def save_pattern(pattern: PatternInsight) -> None:
+    """Save or update a pattern by id."""
+    raw = json.loads(PATTERNS_FILE.read_text().strip()) if PATTERNS_FILE.exists() else []
+    raw = [p for p in raw if p["id"] != pattern.id]
+    raw.append(pattern.model_dump())
+    PATTERNS_FILE.write_text(json.dumps(raw, indent=2, ensure_ascii=False))
+
+
+def merge_pattern(text: str, source: str = "system", tags: list[str] | None = None) -> PatternInsight:
+    """Merge a pattern observation: find similar existing pattern (>70% word overlap)
+    or create new. Increments occurrences. Sets precipitated=True at 3+."""
+    from datetime import datetime
+    existing = get_patterns()
+    text_words = set(text.lower().split())
+
+    # Find best match by word overlap
+    best_match = None
+    best_overlap = 0.0
+    for p in existing:
+        p_words = set(p.pattern.lower().split())
+        if not text_words or not p_words:
+            continue
+        overlap = len(text_words & p_words) / max(len(text_words | p_words), 1)
+        if overlap > best_overlap:
+            best_overlap = overlap
+            best_match = p
+
+    now = datetime.now().isoformat()
+
+    if best_match and best_overlap >= 0.7:
+        # Merge into existing
+        best_match.occurrences += 1
+        best_match.last_seen = now
+        if best_match.occurrences >= 3:
+            best_match.precipitated = True
+        if tags:
+            best_match.tags = list(set(best_match.tags + tags))
+        save_pattern(best_match)
+        return best_match
+    else:
+        # Create new
+        new = PatternInsight(
+            pattern=text,
+            source=source,
+            tags=tags or [],
+            first_seen=now,
+            last_seen=now,
+        )
+        save_pattern(new)
+        return new
+
+
+# ── Relationship helpers (GPS engine) ─────────────────────────────────────────
+
+def project_stats(project_id: str) -> tuple[int, int, int, float]:
+    """Returns (pct_done, mins_done, mins_total, budget_cap).
+    Centralized version — used by both dashboard and cascade logic."""
+    tasks = [t for t in get_tasks()
+             if t.project_id == project_id and not t.is_habit]
+    if not tasks:
+        return 0, 0, 0, 0.0
+    total_e   = sum(t.energy_cost for t in tasks) or 1
+    done_e    = sum(t.energy_cost for t in tasks if t.status == TaskStatus.DONE)
+    mins_tot  = sum(t.estimated_minutes for t in tasks)
+    mins_done = sum(t.estimated_minutes for t in tasks if t.status == TaskStatus.DONE)
+    pct       = int(done_e / total_e * 100)
+
+    proj = next((p for p in get_projects() if p.id == project_id), None)
+    budget = proj.budget_cap if proj else 0.0
+    return pct, mins_done, mins_tot, budget
+
+
+def _recompute_goal_progress(goal_id: str) -> Optional[float]:
+    """Recompute and save goal progress_pct from aligned tasks."""
+    goals = get_goals(active_only=False)
+    goal = next((g for g in goals if g.id == goal_id), None)
+    if not goal:
+        return None
+    tasks = get_tasks(include_habits=False)
+    aligned = [t for t in tasks if goal_id in t.aligns_to]
+    if not aligned:
+        return 0.0
+    done = [t for t in aligned if t.status == TaskStatus.DONE]
+    pct = len(done) / len(aligned) * 100.0
+    goal.progress_pct = round(pct, 1)
+    save_goal(goal)
+    return pct
+
+
+def _check_unblocked(completed_task_id: str) -> list[str]:
+    """Find tasks that were only blocked by the completed task and are now unblocked.
+    Returns list of unblocked task titles."""
+    all_tasks = get_tasks(include_habits=False)  # single read, includes done
+    unblocked = []
+    for t in all_tasks:
+        if t.status == TaskStatus.DONE:
+            continue
+        # Was the completed task blocking t?
+        completed_was_blocking = any(
+            other.id == completed_task_id and t.id in other.blocks
+            for other in all_tasks
+        )
+        if not completed_was_blocking:
+            continue
+        # Are there any OTHER incomplete tasks still blocking t?
+        still_blocked = any(
+            other.id != completed_task_id
+            and other.status != TaskStatus.DONE
+            and t.id in other.blocks
+            for other in all_tasks
+        )
+        if not still_blocked:
+            unblocked.append(t.title)
+    return unblocked
+
+
 # ── Slow Burns ─────────────────────────────────────────────────────────────────
 
 def get_slow_burns() -> list[SlowBurn]:
@@ -846,6 +1042,34 @@ def delete_milestone(m_id: str) -> None:
     MILESTONES_FILE.write_text(json.dumps(
         [m for m in raw if m["id"] != m_id], indent=2, ensure_ascii=False
     ))
+
+
+# ── Project plans ──────────────────────────────────────────────────────────────
+
+def get_all_project_plans() -> dict[str, "ProjectPlan"]:
+    """Load all project plans keyed by project_id."""
+    raw = json.loads(PROJECT_PLANS_FILE.read_text()) if PROJECT_PLANS_FILE.exists() else []
+    return {item["project_id"]: ProjectPlan(**item) for item in raw if "project_id" in item}
+
+
+def get_project_plan(project_id: str) -> "ProjectPlan | None":
+    """Load the structured plan for a project, or None if not yet scoped."""
+    raw = json.loads(PROJECT_PLANS_FILE.read_text()) if PROJECT_PLANS_FILE.exists() else []
+    for item in raw:
+        if item.get("project_id") == project_id:
+            return ProjectPlan(**item)
+    return None
+
+
+def save_project_plan(plan: "ProjectPlan") -> None:
+    """Upsert a project plan (insert or replace by project_id)."""
+    from datetime import datetime as _dt
+    raw = json.loads(PROJECT_PLANS_FILE.read_text()) if PROJECT_PLANS_FILE.exists() else []
+    raw = [x for x in raw if x.get("project_id") != plan.project_id]
+    plan.updated_at = _dt.now().isoformat()
+    raw.append(plan.model_dump())
+    PROJECT_PLANS_FILE.write_text(json.dumps(raw, indent=2, ensure_ascii=False))
+
 
 # ── Finance ───────────────────────────────────────────────────────────────────
 
@@ -1357,3 +1581,46 @@ def get_budget_envelope_summary() -> list[dict]:
     """Return [{name, monthly_limit, category}] from budget.yaml."""
     data = load_budget_yaml()
     return data.get("envelopes", [])
+
+
+# ── Chat session persistence ────────────────────────────────────────────────
+
+def save_chat_session(chat: list) -> None:
+    """Save the current chat to sessions/YYYY-MM-DD.json, overwriting today's file."""
+    ensure_dirs()
+    today = date.today().isoformat()
+    path = SESSIONS_DIR / f"{today}.json"
+    # Strip entries that are just the welcome hints (keep real conversation)
+    entries = [e for e in chat if not (e.get("role") == "assistant" and "Ctrl" in e.get("ansi", ""))]
+    if entries:
+        path.write_text(json.dumps(entries, ensure_ascii=False, indent=2))
+    # Prune files older than 30 days
+    cutoff = date.today() - timedelta(days=30)
+    for f in SESSIONS_DIR.glob("*.json"):
+        try:
+            if date.fromisoformat(f.stem) < cutoff:
+                f.unlink()
+        except ValueError:
+            pass
+
+
+def load_last_chat_session() -> list:
+    """Load today's session file if it exists, else the most recent one from the last 12h."""
+    ensure_dirs()
+    today = date.today().isoformat()
+    today_file = SESSIONS_DIR / f"{today}.json"
+    if today_file.exists():
+        try:
+            return json.loads(today_file.read_text())
+        except Exception:
+            pass
+    # Fall back to yesterday's file if within 12 hours of midnight
+    if datetime.now().hour < 12:
+        yesterday = (date.today() - timedelta(days=1)).isoformat()
+        yfile = SESSIONS_DIR / f"{yesterday}.json"
+        if yfile.exists():
+            try:
+                return json.loads(yfile.read_text())
+            except Exception:
+                pass
+    return []

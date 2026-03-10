@@ -51,9 +51,9 @@ flowchart TB
     NEXT[ ] --> P2
 
     subgraph P2 [Phase 2 — Directive Boardroom]
-        P2A[Load: tasks · goals · calendar · energy\nbudget · values · parent-layer plan]
+        P2A[Load: tasks · goals · calendar · energy\nbudget · values · parent-layer plan\n+ GPS engine context]
         P2A --> P2CK[Cascade check:\nparent layer goals vs current plan\ndo they still align?]
-        P2CK --> P2B[Claude: directive proposal\nbased on current state + constraints]
+        P2CK --> P2B[Claude: directive proposal\nbased on current state + constraints\n+ goal trajectories + nudges]
         P2B --> P2C{User}
         P2C -->|challenge / adjust| P2D[Boardroom refinement\naggregate: time · scope · budget]
         P2D --> P2C
