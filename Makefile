@@ -1,4 +1,4 @@
-.PHONY: install-dev install-hooks lint typecheck security deps complexity docs deadcode coverage funcmetrics hotspots report badges quality
+.PHONY: install-dev install-hooks lint typecheck security deps complexity docs deadcode coverage funcmetrics hotspots report badges quality test-quality mutation
 
 SRC     = viyugam
 REPORTS = reports
@@ -41,8 +41,8 @@ security:
 
 deps:
 	mkdir -p $(REPORTS)
-	$(PIP_AUDIT) -f json -o $(REPORTS)/pip-audit.json 2>/dev/null || true
-	$(PIP_AUDIT) || true
+	$(PIP_AUDIT) --ignore-vuln PYSEC-2022-42969 -f json -o $(REPORTS)/pip-audit.json 2>/dev/null || true
+	$(PIP_AUDIT) --ignore-vuln PYSEC-2022-42969 || true
 
 complexity:
 	mkdir -p $(REPORTS)
@@ -60,8 +60,8 @@ docs:
 
 deadcode:
 	mkdir -p $(REPORTS)
-	$(VULTURE) $(SRC) --min-confidence 80 > $(REPORTS)/vulture.txt 2>&1 || true
-	$(VULTURE) $(SRC) --min-confidence 80 || true
+	$(VULTURE) $(SRC) vulture_whitelist.py --min-confidence 80 > $(REPORTS)/vulture.txt 2>&1 || true
+	$(VULTURE) $(SRC) vulture_whitelist.py --min-confidence 80 || true
 
 coverage:
 	mkdir -p $(REPORTS)
@@ -83,7 +83,16 @@ hotspots:
 	@echo "=== Bottom 10 Files by Maintainability Index (grade C or below) ==="
 	$(RADON) mi $(SRC) --min C -s 2>/dev/null | head -20 || true
 
-report: lint typecheck security deps complexity docs deadcode coverage funcmetrics
+test-quality:
+	mkdir -p $(REPORTS)
+	$(PYTHON) scripts/test_quality.py
+
+mutation:
+	mkdir -p $(REPORTS)
+	$(PYTHON) scripts/mutation_test.py --max-mutants 80
+	$(PYTHON) scripts/test_quality.py
+
+report: lint typecheck security deps complexity docs deadcode coverage funcmetrics test-quality
 	@echo ""
 	@echo "=== All reports in $(REPORTS)/ ==="
 

@@ -4,20 +4,10 @@ Uses Claude with Anthropic's built-in web search to produce comprehensive markdo
 Web search is server-side: Anthropic executes searches, no client-side tool_result loop needed.
 """
 from __future__ import annotations
-import os
+
 from typing import Callable, Optional
 
-import anthropic
-
-
-def _client() -> anthropic.Anthropic:
-    api_key = os.environ.get("ANTHROPIC_API_KEY")
-    if not api_key:
-        raise RuntimeError(
-            "ANTHROPIC_API_KEY not set. Add it to your environment or ~/.viyugam/config.yaml"
-        )
-    return anthropic.Anthropic(api_key=api_key)
-
+from viyugam.engine.client import get_client
 
 RESEARCH_SYSTEM = """You are a thorough research assistant. When given a topic, use web search to
 gather current, accurate information and produce a well-structured markdown report.
@@ -47,7 +37,7 @@ def run_research(
     Handles pause_turn for long responses by re-submitting.
     Returns the final markdown report as a string.
     """
-    client = _client()
+    client = get_client()
 
     messages: list[dict] = [
         {"role": "user", "content": f"Research this topic thoroughly: {topic}"}
@@ -63,8 +53,8 @@ def run_research(
             model="claude-sonnet-4-6",
             max_tokens=8000,
             system=RESEARCH_SYSTEM,
-            tools=tools,
-            messages=messages,
+            tools=tools,  # type: ignore[arg-type]
+            messages=messages,  # type: ignore[arg-type]
         )
 
         if response.stop_reason == "end_turn":
@@ -72,7 +62,7 @@ def run_research(
 
         if response.stop_reason == "pause_turn":
             # Long response paused — re-submit to let Claude continue
-            messages.append({"role": "assistant", "content": response.content})
+            messages.append({"role": "assistant", "content": response.content})  # type: ignore[dict-item]
             if on_status:
                 on_status("Continuing research...")
             continue

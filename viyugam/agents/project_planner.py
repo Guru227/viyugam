@@ -4,18 +4,10 @@ Conversational session to define scope, milestones, budget, and success criteria
 for a project. The output is a structured ProjectPlan stored to disk.
 """
 from __future__ import annotations
+
 import json
-import os
 
-import anthropic
-
-
-def _client() -> anthropic.Anthropic:
-    api_key = os.environ.get("ANTHROPIC_API_KEY")
-    if not api_key:
-        raise RuntimeError("ANTHROPIC_API_KEY not set.")
-    return anthropic.Anthropic(api_key=api_key)
-
+from viyugam.engine.client import get_client, text_of
 
 PROJECT_PLAN_SYSTEM = """\
 You are a project planning collaborator helping someone think through a project clearly.
@@ -86,17 +78,17 @@ def start_project_plan_session(project: dict, existing_plan: "dict | None" = Non
     goals = goals or []
     ctx = _project_context(project, existing_plan, goals)
 
-    client = _client()
+    client = get_client()
     response = client.messages.create(
         model="claude-sonnet-4-6",
         max_tokens=600,
         system=PROJECT_PLAN_SYSTEM,
-        messages=[{
+        messages=[{  # type: ignore[arg-type]
             "role": "user",
             "content": f"Let's plan this project.\n\n{ctx}"
         }],
     )
-    return response.content[0].text.strip()
+    return text_of(response).strip()
 
 
 def project_plan_turn(history: list[dict], user_message: str,
@@ -112,14 +104,14 @@ def project_plan_turn(history: list[dict], user_message: str,
     is_done = any(kw in tl for kw in done_kw)
 
     messages = list(history) + [{"role": "user", "content": user_message}]
-    client = _client()
+    client = get_client()
     response = client.messages.create(
         model="claude-sonnet-4-6",
         max_tokens=800,
         system=PROJECT_PLAN_SYSTEM,
-        messages=messages,
+        messages=messages,  # type: ignore[arg-type]
     )
-    reply = response.content[0].text.strip()
+    reply = text_of(response).strip()
     return reply, is_done
 
 
@@ -156,13 +148,13 @@ Return ONLY valid JSON with this structure:
 
 If information wasn't discussed, use empty string / empty list / 0.0 as defaults."""
 
-    client = _client()
+    client = get_client()
     response = client.messages.create(
         model="claude-sonnet-4-6",
         max_tokens=1000,
-        messages=[{"role": "user", "content": extraction_prompt}],
+        messages=[{"role": "user", "content": extraction_prompt}],  # type: ignore[arg-type]
     )
-    text = response.content[0].text.strip()
+    text = text_of(response).strip()
     if text.startswith("```"):
         text = text.split("\n", 1)[1].rsplit("```", 1)[0].strip()
     try:

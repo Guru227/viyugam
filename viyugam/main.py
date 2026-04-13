@@ -16,26 +16,41 @@ Commands:
     viyugam goals                  View and add long-term goals
 """
 from __future__ import annotations
+
 import argparse
 import json
 import os
 import re
 import sys
 from datetime import date, datetime, timedelta
+from typing import Literal
 
+from rich import box
 from rich.console import Console
 from rich.panel import Panel
+from rich.prompt import Confirm, Prompt
 from rich.table import Table
 from rich.text import Text
-from rich import box
-from rich.prompt import Confirm, Prompt
 
 import viyugam.storage as storage
 from viyugam.models import (
-    Task, Project, TaskStatus, ResilienceState, SystemState,
-    CalendarEntry, CalendarEntryType,
-    SlowBurn, Milestone, Budget, Transaction, Decision, ActualRecord,
-    OKR, KeyResult, TxType, RecurringItem,
+    OKR,
+    ActualRecord,
+    Budget,
+    CalendarEntry,
+    CalendarEntryType,
+    Decision,
+    KeyResult,
+    Milestone,
+    Project,
+    RecurringItem,
+    ResilienceState,
+    SlowBurn,
+    SystemState,
+    Task,
+    TaskStatus,
+    Transaction,
+    TxType,
 )
 
 console = Console()
@@ -145,9 +160,8 @@ def cmd_capture(args: argparse.Namespace) -> None:
 
 def _create_entity_from_classified(classified: dict, boardroom_notes: str = "") -> str:
     """Create a Task/Goal/Project/Note from classified triage item. Returns human-readable label."""
-    from viyugam.models import Goal, Dimension as _Dim
-    from viyugam.models import ProjectStatus
-    from viyugam.storage import _next_id
+    from viyugam.models import Dimension as _Dim
+    from viyugam.models import Goal
 
     etype = classified.get("type", "task")
     title = classified.get("title", "Untitled")
@@ -212,7 +226,7 @@ def _run_triage_session() -> int:
     Returns number of items processed.
     Runs D/A/S///X loop per item.
     """
-    from viyugam.agents.chairman import classify_item, boardroom_discuss_turn, triage_dedup
+    from viyugam.agents.chairman import boardroom_discuss_turn, classify_item, triage_dedup
 
     items = storage.get_triage(unprocessed_only=True)
     if not items:
@@ -235,7 +249,7 @@ def _run_triage_session() -> int:
                     [t.model_dump() for t in existing_tasks[:30]]
                 )
             if dupes:
-                console.print(f"\n[yellow]Possible duplicates found:[/yellow]")
+                console.print("\n[yellow]Possible duplicates found:[/yellow]")
                 for d in dupes:
                     new = next((i for i in items if i.id == d.get("new_id")), None)
                     existing = storage.get_task_by_id(d.get("existing_id", ""))
@@ -256,7 +270,7 @@ def _run_triage_session() -> int:
         try:
             with console.status("[dim]Classifying...[/dim]"):
                 classified = classify_item(item.content)
-        except Exception as e:
+        except Exception:
             classified = {"type": "task", "title": item.content[:80], "dimension": None,
                           "priority": "medium", "due": None, "estimated_minutes": 30,
                           "energy_cost": 5, "initial_draft": item.content}
@@ -292,7 +306,7 @@ def _run_triage_session() -> int:
             if choice == "D":
                 # Boardroom discussion loop
                 history: list[dict] = []
-                console.print(f"\n  [dim]Boardroom — say your thoughts. Type 'done' to accept, 'snooze' to defer.[/dim]")
+                console.print("\n  [dim]Boardroom — say your thoughts. Type 'done' to accept, 'snooze' to defer.[/dim]")
                 console.print(f"  [dim italic]Draft: {current_draft}[/dim italic]\n")
 
                 while True:
@@ -411,7 +425,9 @@ def _run_triage_session() -> int:
 def _run_boardroom_plan(scope: str, state, config, today: str) -> None:
     """Run directive boardroom planning session for weekly/monthly/quarterly scope."""
     from viyugam.agents.chairman import (
-        generate_initial_plan_proposal, directive_boardroom_turn, _build_plan_context
+        _build_plan_context,
+        directive_boardroom_turn,
+        generate_initial_plan_proposal,
     )
 
     # Determine period boundaries
@@ -556,7 +572,7 @@ def _display_boardroom_result(result: dict) -> None:
 
     proposal = result.get("proposal", "")
     if proposal:
-        console.print(f"\n[bold]Proposal:[/bold]")
+        console.print("\n[bold]Proposal:[/bold]")
         if isinstance(proposal, list):
             for p in proposal:
                 console.print(f"  · {p}")
@@ -582,7 +598,7 @@ def _display_boardroom_result(result: dict) -> None:
 # ── plan ───────────────────────────────────────────────────────────────────────
 
 def cmd_plan(args: argparse.Namespace) -> None:
-    from viyugam.agents.chairman import triage_inbox, plan_day
+    from viyugam.agents.chairman import plan_day
 
     state = startup_check()
     config = storage.load_config()
@@ -678,8 +694,8 @@ def cmd_plan(args: argparse.Namespace) -> None:
         day_label = {"office": "office day", "wfh": "WFH day", "off": "day off"}[day_type]
         console.print(f"[dim]Today: {day_label} — {ws.start}–{ws.end}[/dim]")
         for e in calendar_events:
-            t = f" {e.start_time}" if e.start_time else ""
-            console.print(f"  [dim]· {e.title}{t}[/dim]")
+            time_suffix = f" {e.start_time}" if e.start_time else ""
+            console.print(f"  [dim]· {e.title}{time_suffix}[/dim]")
         if calendar_events:
             console.print()
         # _day_type_override: set by dashboard to skip interactive prompt
@@ -813,7 +829,7 @@ def cmd_plan(args: argparse.Namespace) -> None:
 
 def _process_inbox_items(inbox_items, config) -> None:
     from viyugam.agents.chairman import triage_inbox
-    from viyugam.models import Task, Project, ProjectStatus
+    from viyugam.models import Project, Task
 
     config_context = ""
     if config.season:
@@ -975,7 +991,7 @@ def _render_plan(plan: dict, today: str, user_name: str, backlog_tasks=None) -> 
                 )
 
         backlog_count = len(backlog_tasks)
-        overflow_note = f"\n[dim]  … and {backlog_count - 20} more[/dim]" if backlog_count > 20 else ""
+        f"\n[dim]  … and {backlog_count - 20} more[/dim]" if backlog_count > 20 else ""
         backlog_panel = Panel(
             bl_table,
             title=f"[bold]Everything else[/bold] [dim]({backlog_count})[/dim]",
@@ -1167,11 +1183,10 @@ def _complete_task(task: Task, state) -> None:
 
 def _handle_unscheduled_completion(task: Task) -> None:
     """Gracefully handle something done that wasn't planned."""
-    config = storage.load_config()
-    season_focus = config.season.focus.value if config.season else None
+    storage.load_config()
 
     # Just log it — no judgment. The coach surfaces patterns over time, not one-offs.
-    console.print(f"[dim]  Absorbed. Good work.[/dim]")
+    console.print("[dim]  Absorbed. Good work.[/dim]")
 
 
 # ── status ─────────────────────────────────────────────────────────────────────
@@ -1187,7 +1202,7 @@ def cmd_status(args: argparse.Namespace) -> None:
 # ── calendar ───────────────────────────────────────────────────────────────────
 
 def cmd_calendar(args: argparse.Namespace) -> None:
-    state = startup_check()
+    startup_check()
     config = storage.load_config()
     today = date.today().isoformat()
 
@@ -1246,12 +1261,12 @@ def _calendar_show(today: str, days_ahead: int, config) -> None:
                     f"[{style}]{e.title}[/{style}]",
                     e.notes or "",
                 )
-            content = tbl
+            panel_content = tbl  # type: Table | str
         else:
-            content = "[dim]No events.[/dim]"
+            panel_content = "[dim]No events.[/dim]"
 
         border = "cyan" if i == 0 else "dim"
-        console.print(Panel(content, title=title_str, border_style=border, padding=(0, 1)))
+        console.print(Panel(panel_content, title=title_str, border_style=border, padding=(0, 1)))
 
     console.print("[dim]/calendar --add to add an event or block[/dim]")
     console.print()
@@ -1332,6 +1347,7 @@ def _calendar_add() -> None:
 def _calendar_delete() -> None:
     """List all calendar entries and prompt to delete one."""
     import json as _json
+
     from viyugam.storage import CALENDAR_FILE
     raw = _json.loads(CALENDAR_FILE.read_text()) if CALENDAR_FILE.exists() else []
     if not raw:
@@ -1359,7 +1375,7 @@ def _calendar_delete() -> None:
     title = raw[idx].get("title", entry_id)
     if Confirm.ask(f"Delete '{title}'?", default=False):
         storage.delete_calendar_entry(entry_id)
-        console.print(f"[green]Deleted.[/green]")
+        console.print("[green]Deleted.[/green]")
 
 
 # ── log ────────────────────────────────────────────────────────────────────────
@@ -1438,7 +1454,8 @@ def _log_entry(text: str, config=None, state=None) -> None:
             console.print(f"[green]Habit:[/green] {task.title} [dim](id: {task.id})[/dim]")
 
         elif rtype == "goal":
-            from viyugam.models import Goal, Dimension as _Dim
+            from viyugam.models import Dimension as _Dim
+            from viyugam.models import Goal
             dim_str = result.get("dimension", "career")
             try:
                 dimension = _Dim(dim_str) if dim_str else None
@@ -1490,7 +1507,7 @@ def _log_entry(text: str, config=None, state=None) -> None:
             existing = storage.load_journal() or ""
             note = f"\n---\n{text}\n"
             storage.save_journal(existing + note)
-            console.print(f"[green]Journal note saved.[/green]")
+            console.print("[green]Journal note saved.[/green]")
 
         elif rtype == "review_flag":
             # Append to a review flags file
@@ -1557,7 +1574,12 @@ def cmd_log(args: argparse.Namespace) -> None:
 
 
 def _journal_session(args: argparse.Namespace, state, config) -> None:
-    from viyugam.agents.coach import get_opener, chat_turn, generate_summary, format_journal_markdown
+    from viyugam.agents.coach import (
+        chat_turn,
+        format_journal_markdown,
+        generate_summary,
+        get_opener,
+    )
 
     today = date.today().isoformat()
 
@@ -1669,7 +1691,7 @@ def _journal_session(args: argparse.Namespace, state, config) -> None:
                 for m in history
             )
             storage.save_journal(f"# Journal · {today}\n\n{raw}\n", today)
-            console.print(f"[dim]Raw conversation saved.[/dim]")
+            console.print("[dim]Raw conversation saved.[/dim]")
     else:
         console.print("[dim]Nothing to save.[/dim]")
 
@@ -1822,7 +1844,7 @@ def cmd_backlog(args: argparse.Namespace) -> None:
 
 def cmd_milestones(args: argparse.Namespace) -> None:
     startup_check()
-    config = storage.load_config()
+    storage.load_config()
 
     # Mark a milestone done
     done_id = getattr(args, "done", None)
@@ -1860,7 +1882,7 @@ def cmd_milestones(args: argparse.Namespace) -> None:
 
     # List milestones grouped by goal
     milestones = storage.get_milestones()
-    goals = {g.id: g for g in storage.get_goals(active_only=False)}
+    goals_by_id = {g.id: g for g in storage.get_goals(active_only=False)}
 
     if not milestones:
         console.print("\n[dim]No milestones yet.[/dim]\n"
@@ -1873,7 +1895,7 @@ def cmd_milestones(args: argparse.Namespace) -> None:
         by_goal.setdefault(m.goal_id, []).append(m)
 
     for gid, ms in by_goal.items():
-        goal_title = goals[gid].title if gid and gid in goals else "Unlinked"
+        goal_title = goals_by_id[gid].title if gid and gid in goals_by_id else "Unlinked"
         console.print(f"  [bold]{goal_title}[/bold]")
         for m in ms:
             done_mark = "[green]done[/green]" if m.is_done else "[dim]o[/dim]"
@@ -2277,8 +2299,8 @@ def _finance_recurring(config) -> None:
 def _finance_insights(config) -> None:
     """Full AI finance analysis panel."""
     from datetime import date as _date
+
     from viyugam.agents.finance import analyze_finance
-    currency = config.currency
     today = _date.today()
 
     # Gather 3 months of cashflow
@@ -2394,7 +2416,6 @@ def cmd_constitution(args: argparse.Namespace) -> None:
 # ── think ───────────────────────────────────────────────────────────────────────
 
 def cmd_think(args: argparse.Namespace) -> None:
-    from viyugam.agents.boardroom import run_debate
 
     state = startup_check()
     config = storage.load_config()
@@ -2419,7 +2440,7 @@ def _run_think(
     revisit_context: dict | None = None,
 ) -> None:
     from viyugam.agents.boardroom import run_debate
-    from viyugam.models import SomedayItem, Project
+    from viyugam.models import Project, SomedayItem
 
     season = config.season.model_dump() if config.season else None
     dimension_scores = storage.get_avg_dimension_scores(days=14)
@@ -2535,7 +2556,7 @@ def _run_think(
             revisit_after=revisit if revisit else None,
         )
         storage.save_someday(item)
-        console.print(f"\n[dim]Saved to someday.[/dim] Run [bold]viyugam think[/bold] to revisit.")
+        console.print("\n[dim]Saved to someday.[/dim] Run [bold]viyugam think[/bold] to revisit.")
 
     else:
         console.print("\n[dim]Discarded. Moving on.[/dim]")
@@ -2627,8 +2648,11 @@ def _cmd_someday_review(config, state, today: str) -> None:
 
 def cmd_review(args: argparse.Namespace) -> None:
     from viyugam.agents.reviewer import (
-        build_review_data, generate_briefing, review_turn,
-        generate_review_summary, format_review_markdown,
+        build_review_data,
+        format_review_markdown,
+        generate_briefing,
+        generate_review_summary,
+        review_turn,
     )
 
     state = startup_check()
@@ -2704,7 +2728,7 @@ def cmd_review(args: argparse.Namespace) -> None:
     constitution = storage.load_constitution()
     memory_context = storage.get_memory_context()
     coherence = storage.compute_coherence_score(config)
-    decisions_for_review = storage.get_decisions_for_review(days=days)
+    decisions_for_review = [d.model_dump() for d in storage.get_decisions_for_review(days=days)]
 
     with console.status("[dim]Preparing your review...[/dim]"):
         try:
@@ -2889,7 +2913,7 @@ def cmd_review(args: argparse.Namespace) -> None:
     console.print()
 
 
-def _detect_cadence(state, args) -> str:
+def _detect_cadence(state, args) -> Literal["weekly", "monthly", "quarterly"]:
     """Detect review cadence from flags or last review date."""
     # New: check scope arg first
     scope = getattr(args, "scope", None)
@@ -2945,7 +2969,7 @@ def _review_phase1_retro(scope: str, state, config, today: str) -> bool:
     }
 
     console.print(Panel(
-        f"[bold]Phase 1 · Retrospective[/bold]",
+        "[bold]Phase 1 · Retrospective[/bold]",
         border_style="dim",
         padding=(0, 2),
     ))
@@ -2956,7 +2980,7 @@ def _review_phase1_retro(scope: str, state, config, today: str) -> bool:
         import json as _json
         with console.status("[dim]Preparing retrospective...[/dim]"):
             opener, _ = retro_turn([], _json.dumps(review_data, indent=2), scope, review_data)
-    except Exception as e:
+    except Exception:
         opener = f"Let's look at your {scope}. {len(done)} tasks completed, {len(carried)} carried over. What stands out?"
 
     console.print(f"[bold cyan]Reviewer:[/bold cyan] {opener}\n")
@@ -2992,11 +3016,11 @@ def _review_phase2_journal(scope: str, today: str) -> None:
     from viyugam.agents.reviewer import dim_journal_turn, synthesize_dim_journal
 
     console.print(Panel(
-        f"[bold]Phase 2 · Journal by Dimension[/bold]",
+        "[bold]Phase 2 · Journal by Dimension[/bold]",
         border_style="dim",
         padding=(0, 2),
     ))
-    console.print(f"[dim]6 dimensions. Type 'next' to move on, 'skip' to skip.[/dim]\n")
+    console.print("[dim]6 dimensions. Type 'next' to move on, 'skip' to skip.[/dim]\n")
 
     for dim in DIMENSIONS:
         console.print(f"\n[bold cyan]── {dim.upper()} ──[/bold cyan]")
@@ -3004,7 +3028,7 @@ def _review_phase2_journal(scope: str, today: str) -> None:
         # Check if already journaled this dim today
         journal_path = storage.JOURNAL / f"{today}-{scope}-{dim}.md"
         if journal_path.exists():
-            console.print(f"  [dim]Already journaled.[/dim]")
+            console.print("  [dim]Already journaled.[/dim]")
             continue
 
         # Opening question
@@ -3068,18 +3092,18 @@ def _review_phase2_journal(scope: str, today: str) -> None:
 
 def _review_phase3_socratic(scope: str, today: str) -> None:
     """Phase 3: Socratic values session (quarterly only). Updates values.yaml."""
-    from viyugam.agents.socratic import synthesize_patterns, next_question, draft_values_diff
-    from pathlib import Path
+
+    from viyugam.agents.socratic import draft_values_diff, next_question, synthesize_patterns
 
     console.print(Panel(
-        f"[bold]Phase 3 · Socratic Values[/bold]",
+        "[bold]Phase 3 · Socratic Values[/bold]",
         border_style="dim",
         padding=(0, 2),
     ))
     console.print("[dim]Quarterly values reflection. 'next' to wrap up, 'skip' to skip.[/dim]\n")
 
     # Load journal entries for this period
-    period_start = storage.period_start(scope, date.fromisoformat(today))
+    storage.period_start(scope, date.fromisoformat(today))
     journal_entries = []
     for dim in DIMENSIONS:
         for scope_key in (scope, "weekly"):
@@ -3099,7 +3123,7 @@ def _review_phase3_socratic(scope: str, today: str) -> None:
         with console.status("[dim]Synthesising patterns...[/dim]"):
             patterns = synthesize_patterns(journal_entries, values)
         console.print(f"[bold]Patterns:[/bold] {patterns}\n")
-    except Exception as e:
+    except Exception:
         patterns = "Pattern synthesis unavailable."
         console.print(f"[dim]{patterns}[/dim]\n")
 
@@ -3140,7 +3164,7 @@ def _review_phase3_socratic(scope: str, today: str) -> None:
         console.print(f"[yellow]Could not draft values update: {e}[/yellow]")
         return
 
-    console.print(f"\n[bold]Proposed values update:[/bold]")
+    console.print("\n[bold]Proposed values update:[/bold]")
     if diff.get("prayer"):
         console.print(f"  Prayer: {diff['prayer'][:100]}")
     for dim, text in (diff.get("chapters") or {}).items():
@@ -3166,7 +3190,7 @@ def _review_phase3_socratic(scope: str, today: str) -> None:
 def _review_phase4_plan(scope: str, state, config, today: str) -> None:
     """Phase 4: Cascade check + plan. Calls into cmd_plan with the scope."""
     console.print(Panel(
-        f"[bold]Phase 4 · Plan[/bold]",
+        "[bold]Phase 4 · Plan[/bold]",
         border_style="dim",
         padding=(0, 2),
     ))
@@ -3206,9 +3230,9 @@ def _update_season(config) -> None:
 # ── goals ──────────────────────────────────────────────────────────────────────
 
 def cmd_goals(args: argparse.Namespace) -> None:
-    from viyugam.models import Goal, Dimension
+    from viyugam.models import Dimension, Goal
 
-    state = startup_check()
+    startup_check()
     config = storage.load_config()
 
     if getattr(args, "add", False):
@@ -3334,8 +3358,9 @@ def cmd_goals(args: argparse.Namespace) -> None:
 # ── research ───────────────────────────────────────────────────────────────────
 
 def cmd_research(args: argparse.Namespace) -> None:
-    from viyugam.agents.researcher import run_research
     from rich.markdown import Markdown
+
+    from viyugam.agents.researcher import run_research
 
     state = startup_check()
     topic = " ".join(args.topic)
@@ -3385,13 +3410,13 @@ def cmd_research(args: argparse.Namespace) -> None:
 
 def cmd_okrs(args: argparse.Namespace) -> None:
     startup_check()
-    config = storage.load_config()
+    storage.load_config()
     current_q = storage.get_current_quarter()
 
     okrs = storage.get_okrs(active_only=False)
     if not okrs:
         console.print(
-            f"\n[dim]No OKRs yet.[/dim]\n"
+            "\n[dim]No OKRs yet.[/dim]\n"
             "Generate them during a quarterly review: [bold]/review --quarterly[/bold]\n"
         )
         return
@@ -3424,7 +3449,7 @@ def cmd_okrs(args: argparse.Namespace) -> None:
 def cmd_horizon(args: argparse.Namespace) -> None:
     """4-12 week forward view: milestones, deadlines, OKRs."""
     startup_check()
-    config = storage.load_config()
+    storage.load_config()
     today = date.today()
 
     # Collect all dated items in the next 12 weeks
@@ -3448,8 +3473,8 @@ def cmd_horizon(args: argparse.Namespace) -> None:
         ws = week_start.isoformat()
         we = week_end.isoformat()
 
-        week_milestones = [m for m in milestones if ws <= m.due_date <= we]
-        week_tasks = [t for t in tasks_with_dates if ws <= t.scheduled_date <= we]
+        week_milestones = [m for m in milestones if m.due_date is not None and ws <= m.due_date <= we]
+        week_tasks = [t for t in tasks_with_dates if t.scheduled_date is not None and ws <= t.scheduled_date <= we]
 
         if not week_milestones and not week_tasks and week_offset > 0:
             continue
@@ -3498,8 +3523,8 @@ def cmd_find(args: argparse.Namespace) -> None:
     if not query:
         return
 
-    config = storage.load_config()
-    today = date.today().isoformat()
+    storage.load_config()
+    date.today().isoformat()
 
     # Gather searchable content
     tasks = storage.get_tasks(include_habits=False)
@@ -3563,7 +3588,8 @@ Return ONLY a JSON array (most relevant first, max 8 results):
             system=SEARCH_SYSTEM,
             messages=[{"role": "user", "content": f"Query: {query}\n\nCorpus:\n{corpus}"}],
         )
-    text = response.content[0].text.strip()
+    from viyugam.agents._api import text_of
+    text = text_of(response).strip()
     if text.startswith("```"):
         text = text.split("\n", 1)[1].rsplit("```", 1)[0].strip()
 
@@ -3647,19 +3673,20 @@ def cmd_setup(args: argparse.Namespace) -> None:
     wfh_days    = [d.strip().lower() for d in wfh_raw.split(",")    if d.strip()]
 
     # Build config — preserve api_key if it was already set
+    season_data: dict = {
+        "name":  season_name,
+        "focus": season_focus,
+    }
+    if season_secondary:
+        season_data["secondary"] = season_secondary
     config_data = {
         "user_name":      name,
         "work_hours_cap": int(hours),
         "day_start":      int(day_start),
         "currency":       currency,
         "timezone":       timezone,
-        "season": {
-            "name":  season_name,
-            "focus": season_focus,
-        },
+        "season": season_data,
     }
-    if season_secondary:
-        config_data["season"]["secondary"] = season_secondary
     if office_days or wfh_days:
         config_data["work_schedule"] = {
             "start": work_start, "end": work_end,

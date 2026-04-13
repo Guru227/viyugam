@@ -1,4 +1,4 @@
-"""Tests for v0.3–v0.6 features."""
+"""Tests for v0.3-v0.6 features."""
 from datetime import date, timedelta
 import pytest
 
@@ -39,7 +39,7 @@ def test_energy_cache_stale_if_old(tmp_path):
     old_date = (date.today() - timedelta(days=5)).isoformat()
     cached = {"peak_hours": "old", "_analyzed_on": old_date}
     cache.write_text(json.dumps(cached))
-    # No journal files → returns empty even though cache stale
+    # No journal files -> returns empty even though cache stale
     result = get_energy_pattern(journal_dir, cache)
     assert result == {}
 
@@ -60,8 +60,11 @@ def test_okr_model_created():
 
 def test_okr_storage_roundtrip(tmp_path, monkeypatch):
     import viyugam.storage as storage
-    monkeypatch.setattr(storage, "OKRS_FILE", tmp_path / "okrs.json")
-    (tmp_path / "okrs.json").write_text("[]")
+    from viyugam.storage import _paths
+    okrs_file = tmp_path / "okrs.json"
+    monkeypatch.setattr(_paths, "OKRS_FILE", okrs_file)
+    monkeypatch.setattr(storage, "OKRS_FILE", okrs_file)
+    okrs_file.write_text("[]")
     from viyugam.models import OKR, KeyResult
     kr = KeyResult(text="Run 50km total", target="50km")
     okr = OKR(quarter="2026-Q2", objective="Get fit", key_results=[kr])
@@ -86,8 +89,11 @@ def test_get_next_quarter_wraps():
 
 def test_okr_active_filter(tmp_path, monkeypatch):
     import viyugam.storage as storage
-    monkeypatch.setattr(storage, "OKRS_FILE", tmp_path / "okrs.json")
-    (tmp_path / "okrs.json").write_text("[]")
+    from viyugam.storage import _paths
+    okrs_file = tmp_path / "okrs.json"
+    monkeypatch.setattr(_paths, "OKRS_FILE", okrs_file)
+    monkeypatch.setattr(storage, "OKRS_FILE", okrs_file)
+    okrs_file.write_text("[]")
     from viyugam.models import OKR
     active = OKR(quarter="2026-Q1", objective="Active one", is_active=True)
     inactive = OKR(quarter="2025-Q4", objective="Old one", is_active=False)
@@ -100,15 +106,20 @@ def test_okr_active_filter(tmp_path, monkeypatch):
 
 def test_get_recent_journals_empty(tmp_path, monkeypatch):
     import viyugam.storage as storage
-    monkeypatch.setattr(storage, "JOURNALS_DIR", tmp_path / "journals")
-    (tmp_path / "journals").mkdir()
+    from viyugam.storage import _paths
+    jdir = tmp_path / "journals"
+    jdir.mkdir()
+    monkeypatch.setattr(_paths, "JOURNALS_DIR", jdir)
+    monkeypatch.setattr(storage, "JOURNALS_DIR", jdir)
     result = storage.get_recent_journals(days=7)
     assert result == []
 
 def test_get_recent_journals_finds_files(tmp_path, monkeypatch):
     import viyugam.storage as storage
+    from viyugam.storage import _paths
     jdir = tmp_path / "journals"
     jdir.mkdir()
+    monkeypatch.setattr(_paths, "JOURNALS_DIR", jdir)
     monkeypatch.setattr(storage, "JOURNALS_DIR", jdir)
     today = date.today().isoformat()
     (jdir / f"{today}.md").write_text("# Journal\n\nHad a great day.")

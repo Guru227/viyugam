@@ -4,23 +4,11 @@ Handles inbox triage and daily schedule generation.
 Fast, tactical, grounded in context.
 """
 from __future__ import annotations
+
 import json
-import os
-from typing import Optional
 
-import anthropic
-
+from viyugam.engine.client import get_client, text_of
 from viyugam.pii import redact
-
-
-def _client() -> anthropic.Anthropic:
-    api_key = os.environ.get("ANTHROPIC_API_KEY")
-    if not api_key:
-        raise RuntimeError(
-            "ANTHROPIC_API_KEY not set. Add it to your environment or ~/.viyugam/config.yaml"
-        )
-    return anthropic.Anthropic(api_key=api_key)
-
 
 # ── Inbox Triage ───────────────────────────────────────────────────────────────
 
@@ -68,15 +56,15 @@ def triage_inbox(items: list[str], config_context: str = "") -> list[dict]:
         f"- {item}" for item in redacted_items
     )
 
-    client = _client()
+    client = get_client()
     response = client.messages.create(
         model="claude-sonnet-4-6",
         max_tokens=4096,
         system=TRIAGE_SYSTEM,
-        messages=[{"role": "user", "content": user_content}],
+        messages=[{"role": "user", "content": user_content}],  # type: ignore[arg-type]
     )
 
-    text = response.content[0].text.strip()
+    text = text_of(response).strip()
     # Strip markdown code fences if present
     if text.startswith("```"):
         text = text.split("\n", 1)[1].rsplit("```", 1)[0].strip()
@@ -286,15 +274,15 @@ GOALS (for context):
 
 {journal_context}"""
 
-    client = _client()
+    client = get_client()
     response = client.messages.create(
         model="claude-sonnet-4-6",
         max_tokens=3000,
         system=PLAN_SYSTEM,
-        messages=[{"role": "user", "content": redact(user_content)}],
+        messages=[{"role": "user", "content": redact(user_content)}],  # type: ignore[arg-type]
     )
 
-    text = response.content[0].text.strip()
+    text = text_of(response).strip()
     if text.startswith("```"):
         text = text.split("\n", 1)[1].rsplit("```", 1)[0].strip()
 
@@ -325,15 +313,15 @@ GOALS and TASKS lists may be provided in context — use them to suggest relatio
 
 def classify_item(content: str, context: str = "") -> dict:
     """Classify a single triage capture. Returns structured dict."""
-    client = _client()
+    client = get_client()
     msg = f"{context}\n\nCapture: {redact(content)}" if context else f"Capture: {redact(content)}"
     response = client.messages.create(
         model="claude-sonnet-4-6",
         max_tokens=512,
         system=CLASSIFY_ITEM_SYSTEM,
-        messages=[{"role": "user", "content": msg}],
+        messages=[{"role": "user", "content": msg}],  # type: ignore[arg-type]
     )
-    text = response.content[0].text.strip()
+    text = text_of(response).strip()
     if text.startswith("```"):
         text = text.split("\n", 1)[1].rsplit("```", 1)[0].strip()
     try:
@@ -368,7 +356,7 @@ def boardroom_discuss_turn(
     history: list[dict],
 ) -> dict:
     """One turn of the boardroom discussion. Returns {vision, resource, risk, synthesis, draft}."""
-    client = _client()
+    client = get_client()
     messages = list(history)
     messages.append({
         "role": "user",
@@ -378,9 +366,9 @@ def boardroom_discuss_turn(
         model="claude-sonnet-4-6",
         max_tokens=512,
         system=BOARDROOM_SYSTEM,
-        messages=messages,
+        messages=messages,  # type: ignore[arg-type]
     )
-    text = response.content[0].text.strip()
+    text = text_of(response).strip()
     if text.startswith("```"):
         text = text.split("\n", 1)[1].rsplit("```", 1)[0].strip()
     try:
@@ -400,7 +388,7 @@ def triage_dedup(new_items: list[dict], existing_tasks: list[dict]) -> list[dict
     """Find near-duplicate pairs between new triage items and existing tasks."""
     if not new_items or not existing_tasks:
         return []
-    client = _client()
+    client = get_client()
     msg = (
         f"New triage items:\n{json.dumps([{'id': i['id'], 'content': i['content']} for i in new_items[:20]], indent=2)}\n\n"
         f"Existing tasks:\n{json.dumps([{'id': t.get('id'), 'title': t.get('title')} for t in existing_tasks[:30]], indent=2)}"
@@ -409,9 +397,9 @@ def triage_dedup(new_items: list[dict], existing_tasks: list[dict]) -> list[dict
         model="claude-sonnet-4-6",
         max_tokens=1024,
         system=DEDUP_SYSTEM,
-        messages=[{"role": "user", "content": redact(msg)}],
+        messages=[{"role": "user", "content": redact(msg)}],  # type: ignore[arg-type]
     )
-    text = response.content[0].text.strip()
+    text = text_of(response).strip()
     if text.startswith("```"):
         text = text.split("\n", 1)[1].rsplit("```", 1)[0].strip()
     try:
@@ -458,7 +446,7 @@ def directive_boardroom_turn(
     current_proposal: str = "",
 ) -> dict:
     """One turn of directive boardroom planning. Returns structured plan dict."""
-    client = _client()
+    client = get_client()
     messages = list(history)
     msg = (
         f"Scope: {scope.upper()} planning\n"
@@ -471,9 +459,9 @@ def directive_boardroom_turn(
         model="claude-sonnet-4-6",
         max_tokens=1024,
         system=DIRECTIVE_PLAN_SYSTEM,
-        messages=messages,
+        messages=messages,  # type: ignore[arg-type]
     )
-    text = response.content[0].text.strip()
+    text = text_of(response).strip()
     if text.startswith("```"):
         text = text.split("\n", 1)[1].rsplit("```", 1)[0].strip()
     try:

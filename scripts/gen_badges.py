@@ -166,6 +166,62 @@ def funcmetrics_badge() -> None:
     print(f"  func length: {label} ({color})")
 
 
+def uat_badge() -> None:
+    try:
+        with open("reports/test_quality.json") as f:
+            data = json.load(f)
+        uat_tests = data.get("uat_tests", 0)
+        uat_classes = data.get("uat_classes", 0)
+    except (FileNotFoundError, json.JSONDecodeError):
+        label, color = "N/A", "lightgrey"
+    else:
+        label = f"{uat_tests} tests / {uat_classes} scenarios"
+        color = "green" if uat_tests >= 15 else "yellow" if uat_tests >= 5 else "red"
+    badge = anybadge.Badge("UAT", label, default_color=color)
+    badge.write_badge("badges/uat.svg", overwrite=True)
+    print(f"  UAT: {label} ({color})")
+
+
+def test_quality_badge() -> None:
+    try:
+        with open("reports/test_quality.json") as f:
+            data = json.load(f)
+        density = data.get("assertion_density", 0)
+        total = data.get("total_tests", 0)
+    except (FileNotFoundError, json.JSONDecodeError):
+        label, color = "N/A", "lightgrey"
+    else:
+        label = f"{density} asserts/test ({total} tests)"
+        color = "green" if density >= 2.0 else "yellow" if density >= 1.0 else "red"
+    badge = anybadge.Badge("test quality", label, default_color=color)
+    badge.write_badge("badges/test_quality.svg", overwrite=True)
+    print(f"  test quality: {label} ({color})")
+
+
+def mutation_badge() -> None:
+    try:
+        # Prefer dedicated mutation report, fall back to test_quality.json
+        for path in ("reports/mutation.json", "reports/test_quality.json"):
+            try:
+                with open(path) as f:
+                    data = json.load(f)
+                if data.get("mutation_score") is not None:
+                    break
+            except FileNotFoundError:
+                continue
+        score = data.get("mutation_score")
+        if score is None:
+            raise ValueError("no data")
+    except (FileNotFoundError, json.JSONDecodeError, ValueError):
+        label, color = "N/A", "lightgrey"
+    else:
+        label = f"{score:.0f}%"
+        color = "green" if score >= 70 else "yellow" if score >= 50 else "red"
+    badge = anybadge.Badge("mutation score", label, default_color=color)
+    badge.write_badge("badges/mutation.svg", overwrite=True)
+    print(f"  mutation score: {label} ({color})")
+
+
 if __name__ == "__main__":
     print("Generating badges...")
     lint_badge()
@@ -177,4 +233,7 @@ if __name__ == "__main__":
     deadcode_badge()
     coverage_badge()
     funcmetrics_badge()
+    uat_badge()
+    test_quality_badge()
+    mutation_badge()
     print("Done. badges/ updated.")

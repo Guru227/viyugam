@@ -4,6 +4,7 @@ Launched when `viyugam` is called with no arguments.
 Type naturally — Claude routes everything.
 """
 from __future__ import annotations
+
 import argparse
 import os
 import shutil
@@ -159,6 +160,7 @@ def _show_help() -> None:
 def _pick_task():
     """Interactive numbered task picker. Returns a Task or None."""
     from prompt_toolkit.shortcuts import prompt as pt_prompt
+
     from viyugam.models import TaskStatus
 
     all_tasks = storage.get_tasks(include_habits=False)
@@ -276,6 +278,55 @@ def _done_by_hint(hint: str | None) -> None:
 
 # ── Delete-goal-by-hint ────────────────────────────────────────────────────────
 
+def _pick_goal_by_number(choices: list):
+    """Prompt user to pick a goal by number from a list. Returns Goal or None."""
+    try:
+        from prompt_toolkit.shortcuts import prompt as pt_prompt
+        raw = pt_prompt("Delete number (or Enter to cancel): ").strip()
+        if not raw or not raw.isdigit():
+            return None
+        idx = int(raw) - 1
+        if not (0 <= idx < len(choices)):
+            console.print("[red]Out of range.[/red]")
+            return None
+        return choices[idx]
+    except (KeyboardInterrupt, EOFError):
+        return None
+
+
+def _find_goal_by_hint(hint: str, goals: list):
+    """Fuzzy-match hint against goals. Returns a single goal or None (prints UI if ambiguous)."""
+    hint_lower = hint.lower()
+    hint_words = set(hint_lower.split())
+
+    def _score(g) -> int:
+        t = g.title.lower()
+        if hint_lower in t:
+            return 100
+        return len(hint_words & set(t.split()))
+
+    scored = sorted([(g, _score(g)) for g in goals], key=lambda x: -x[1])
+    scored = [(g, s) for g, s in scored if s > 0]
+
+    if not scored:
+        console.print(f"[yellow]No goals matching \"{hint}\".[/yellow]")
+        return None
+
+    if len(scored) == 1 or scored[0][1] >= 100 or (len(scored) > 1 and scored[0][1] > scored[1][1] * 2):
+        return scored[0][0]
+
+    matches = [g for g, _ in scored[:5]]
+    if _in_dashboard():
+        console.print(f"[yellow]Multiple goals match \"{hint}\" — be more specific:[/yellow]")
+        for g in matches:
+            console.print(f"  · {g.title}")
+        return None
+    console.print(f"[dim]Multiple matches for \"{hint}\":[/dim]")
+    for i, g in enumerate(matches, 1):
+        console.print(f"  [dim]{i}.[/dim]  {g.title}")
+    return _pick_goal_by_number(matches)
+
+
 def _delete_goal_by_hint(hint: str | None) -> None:
     """Delete a goal by fuzzy-matching hint text against goal titles."""
     goals = storage.get_goals(active_only=False)
@@ -285,7 +336,6 @@ def _delete_goal_by_hint(hint: str | None) -> None:
         return
 
     if not hint:
-        # No hint — list goals
         console.print()
         for i, g in enumerate(goals, 1):
             dim = g.dimension.value if g.dimension else "—"
@@ -294,77 +344,212 @@ def _delete_goal_by_hint(hint: str | None) -> None:
         if _in_dashboard():
             console.print("[dim]Be more specific, e.g. \"delete goal Run a 10k\"[/dim]")
             return
-        try:
-            from prompt_toolkit.shortcuts import prompt as pt_prompt
-            raw = pt_prompt("Delete number (or Enter to cancel): ").strip()
-            if not raw or not raw.isdigit():
-                return
-            idx = int(raw) - 1
-            if not (0 <= idx < len(goals)):
-                console.print("[red]Out of range.[/red]")
-                return
-            goal = goals[idx]
-        except (KeyboardInterrupt, EOFError):
-            return
+        goal = _pick_goal_by_number(goals)
     else:
-        hint_lower = hint.lower()
-        hint_words = set(hint_lower.split())
+        goal = _find_goal_by_hint(hint, goals)
 
-        def _score(g) -> int:
-            t = g.title.lower()
-            if hint_lower in t:
-                return 100
-            return len(hint_words & set(t.split()))
-
-        scored = sorted([(g, _score(g)) for g in goals], key=lambda x: -x[1])
-        scored = [(g, s) for g, s in scored if s > 0]
-
-        if not scored:
-            console.print(f"[yellow]No goals matching \"{hint}\".[/yellow]")
-            return
-
-        if len(scored) == 1 or scored[0][1] >= 100 or (len(scored) > 1 and scored[0][1] > scored[1][1] * 2):
-            goal = scored[0][0]
-        else:
-            matches = [g for g, _ in scored[:5]]
-            if _in_dashboard():
-                console.print(f"[yellow]Multiple goals match \"{hint}\" — be more specific:[/yellow]")
-                for g in matches:
-                    console.print(f"  · {g.title}")
-                return
-            console.print(f"[dim]Multiple matches for \"{hint}\":[/dim]")
-            for i, g in enumerate(matches, 1):
-                console.print(f"  [dim]{i}.[/dim]  {g.title}")
-            try:
-                from prompt_toolkit.shortcuts import prompt as pt_prompt
-                raw = pt_prompt("Delete number (or Enter to cancel): ").strip()
-                if not raw or not raw.isdigit():
-                    return
-                idx = int(raw) - 1
-                if not (0 <= idx < len(matches)):
-                    return
-                goal = matches[idx]
-            except (KeyboardInterrupt, EOFError):
-                return
+    if goal is None:
+        return
 
     if storage.delete_goal(goal.id):
         console.print(f"[green]Deleted goal:[/green] {goal.title}")
     else:
-        console.print(f"[red]Could not delete goal.[/red]")
+        console.print("[red]Could not delete goal.[/red]")
 
 
 # ── AI Dispatcher ──────────────────────────────────────────────────────────────
 
+def _handle_unknown(text, args, item):
+    clarify = item.get("clarify")
+    if clarify:
+        console.print(f"[dim]{clarify}[/dim]")
+        try:
+            from prompt_toolkit.shortcuts import prompt as pt_prompt
+            follow_up = pt_prompt("> ").strip()
+            if follow_up:
+                _ai_dispatch(follow_up)
+        except (KeyboardInterrupt, EOFError):
+            pass
+
+
+def _handle_plan_day(text, args, item):
+    from viyugam.main import cmd_plan
+    cadence = (args.get("review_cadence") or "daily").lower()
+    cmd_plan(argparse.Namespace(replan=False, scope=cadence))
+
+
+def _handle_log_content(text, args, item):
+    from viyugam.main import _triage_capture
+    text_val = args.get("text") or text
+    _triage_capture(text_val)
+
+
+def _handle_mark_done(text, args, item):
+    import re as _re
+    hint = args.get("task_title_hint") or ""
+    if _re.match(r'^[TGPNtgpn]-\d{3,}$', hint.strip()):
+        result = storage.mark_entity_done(hint.strip().upper())
+        if result:
+            console.print(f"[green]{result}[/green]")
+        else:
+            console.print(f"[yellow]Not found:[/yellow] {hint}")
+    else:
+        _done_by_hint(hint)
+
+
+def _handle_run_think(text, args, item):
+    from viyugam.main import _triage_capture
+    text_val = args.get("proposal") or text
+    _triage_capture(text_val)
+    console.print("[dim]Captured to triage. Run 'plan' to process it in the boardroom.[/dim]")
+
+
+def _handle_run_review(text, args, item):
+    from viyugam.main import cmd_review
+    cadence = (args.get("review_cadence") or "weekly").lower()
+    cmd_review(argparse.Namespace(
+        weekly=(cadence == "weekly"),
+        monthly=(cadence == "monthly"),
+        quarterly=(cadence == "quarterly"),
+        scope=cadence,
+    ))
+
+
+def _handle_show_status(text, args, item):
+    console.print("[dim]Dashboard is always available — run 'viyugam' with no args.[/dim]")
+
+
+def _handle_show_finance(text, args, item):
+    from viyugam.main import cmd_finance
+    cmd_finance(argparse.Namespace(sub="summary"))
+
+
+def _handle_log_finance(text, args, item):
+    from viyugam.main import _triage_capture
+    text_val = args.get("text") or text
+    _triage_capture(text_val)
+
+
+def _handle_finance_history(text, args, item):
+    from viyugam.main import cmd_finance
+    cmd_finance(argparse.Namespace(sub="history"))
+
+
+def _handle_finance_recurring(text, args, item):
+    from viyugam.main import cmd_finance
+    cmd_finance(argparse.Namespace(sub="recurring"))
+
+
+def _handle_finance_insights(text, args, item):
+    from viyugam.main import cmd_finance
+    cmd_finance(argparse.Namespace(sub="insights"))
+
+
+def _handle_show_goals(text, args, item):
+    from viyugam.main import cmd_goals
+    cmd_goals(argparse.Namespace(add=False, title=[], dimension=None))
+
+
+def _handle_delete_goal(text, args, item):
+    _delete_goal_by_hint(args.get("task_title_hint"))
+
+
+def _handle_add_goal(text, args, item):
+    from viyugam.main import _triage_capture
+    text_val = args.get("text") or text
+    _triage_capture(text_val)
+
+
+def _handle_show_decisions(text, args, item):
+    from viyugam.main import cmd_decisions
+    cmd_decisions(argparse.Namespace())
+
+
+def _handle_show_backlog(text, args, item):
+    from viyugam.main import cmd_backlog
+    cmd_backlog(argparse.Namespace())
+
+
+def _handle_show_horizon(text, args, item):
+    from viyugam.main import cmd_horizon
+    cmd_horizon(argparse.Namespace())
+
+
+def _handle_show_okrs(text, args, item):
+    from viyugam.main import cmd_okrs
+    cmd_okrs(argparse.Namespace())
+
+
+def _handle_show_slow_burns(text, args, item):
+    from viyugam.main import cmd_slow_burns
+    cmd_slow_burns(argparse.Namespace(add=False))
+
+
+def _handle_run_research(text, args, item):
+    from viyugam.main import cmd_research
+    query = args.get("query") or text
+    cmd_research(argparse.Namespace(topic=query.split()))
+
+
+def _handle_run_find(text, args, item):
+    from viyugam.main import cmd_find
+    query = args.get("query") or text
+    cmd_find(argparse.Namespace(query=query.split()))
+
+
+def _handle_show_calendar(text, args, item):
+    from viyugam.main import cmd_calendar
+    cmd_calendar(argparse.Namespace(add=False, delete=False))
+
+
+def _handle_show_constitution(text, args, item):
+    from viyugam.main import cmd_constitution
+    cmd_constitution(argparse.Namespace())
+
+
+def _handle_show_dashboard(text, args, item):
+    from viyugam.dashboard import run_dashboard
+    run_dashboard()
+
+
+def _handle_help(text, args, item):
+    _show_help()
+
+
+_DISPATCH = {
+    "plan_day": _handle_plan_day,
+    "log_content": _handle_log_content,
+    "mark_done": _handle_mark_done,
+    "run_think": _handle_run_think,
+    "run_review": _handle_run_review,
+    "show_status": _handle_show_status,
+    "show_finance": _handle_show_finance,
+    "log_finance": _handle_log_finance,
+    "finance_history": _handle_finance_history,
+    "finance_recurring": _handle_finance_recurring,
+    "finance_insights": _handle_finance_insights,
+    "show_goals": _handle_show_goals,
+    "delete_goal": _handle_delete_goal,
+    "add_goal": _handle_add_goal,
+    "show_decisions": _handle_show_decisions,
+    "show_backlog": _handle_show_backlog,
+    "show_horizon": _handle_show_horizon,
+    "show_okrs": _handle_show_okrs,
+    "show_slow_burns": _handle_show_slow_burns,
+    "run_research": _handle_run_research,
+    "run_find": _handle_run_find,
+    "show_calendar": _handle_show_calendar,
+    "show_constitution": _handle_show_constitution,
+    "show_values": _handle_show_constitution,
+    "show_dashboard": _handle_show_dashboard,
+    "help": _handle_help,
+}
+
+
 def _ai_dispatch(text: str) -> None:
     """Classify text with AI, then execute each action in the returned list."""
-    from viyugam.main import (
-        cmd_plan, cmd_log, cmd_done, cmd_review,
-        cmd_finance, cmd_goals, cmd_decisions,
-        cmd_backlog, cmd_horizon, cmd_okrs, cmd_slow_burns,
-        cmd_research, cmd_find, cmd_calendar, cmd_constitution,
-        _check_api_key, _triage_capture,
-    )
     from viyugam.agents.intent import classify_intent
+    from viyugam.main import _check_api_key
 
     if not _check_api_key():
         return
@@ -379,122 +564,14 @@ def _ai_dispatch(text: str) -> None:
     for item in actions:
         action = item.get("action", "unknown")
         args = item.get("args", {}) or {}
-        clarify = item.get("clarify")
 
         if action == "unknown":
-            if clarify:
-                console.print(f"[dim]{clarify}[/dim]")
-                try:
-                    from prompt_toolkit.shortcuts import prompt as pt_prompt
-                    follow_up = pt_prompt("> ").strip()
-                    if follow_up:
-                        _ai_dispatch(follow_up)
-                except (KeyboardInterrupt, EOFError):
-                    pass
+            _handle_unknown(text, args, item)
             return
 
-        if action == "plan_day":
-            cadence = (args.get("review_cadence") or "daily").lower()
-            cmd_plan(argparse.Namespace(replan=False, scope=cadence))
-
-        elif action == "log_content":
-            text_val = args.get("text") or text
-            _triage_capture(text_val)
-
-        elif action == "mark_done":
-            hint = args.get("task_title_hint") or ""
-            # Check if it looks like a seq_id pattern
-            import re as _re
-            if _re.match(r'^[TGPNtgpn]-\d{3,}$', hint.strip()):
-                result = storage.mark_entity_done(hint.strip().upper())
-                if result:
-                    console.print(f"[green]{result}[/green]")
-                else:
-                    console.print(f"[yellow]Not found:[/yellow] {hint}")
-            else:
-                _done_by_hint(hint)
-
-        elif action == "run_think":
-            # Redirect: capture to triage for boardroom discussion during plan
-            text_val = args.get("proposal") or text
-            _triage_capture(text_val)
-            console.print("[dim]Captured to triage. Run 'plan' to process it in the boardroom.[/dim]")
-
-        elif action == "run_review":
-            cadence = (args.get("review_cadence") or "weekly").lower()
-            cmd_review(argparse.Namespace(
-                weekly=(cadence == "weekly"),
-                monthly=(cadence == "monthly"),
-                quarterly=(cadence == "quarterly"),
-                scope=cadence,
-            ))
-
-        elif action == "show_status":
-            # Redirect to dashboard hint
-            console.print("[dim]Dashboard is always available — run 'viyugam' with no args.[/dim]")
-
-        elif action == "show_finance":
-            cmd_finance(argparse.Namespace(sub="summary"))
-
-        elif action == "log_finance":
-            text_val = args.get("text") or text
-            _triage_capture(text_val)
-
-        elif action == "finance_history":
-            cmd_finance(argparse.Namespace(sub="history"))
-
-        elif action == "finance_recurring":
-            cmd_finance(argparse.Namespace(sub="recurring"))
-
-        elif action == "finance_insights":
-            cmd_finance(argparse.Namespace(sub="insights"))
-
-        elif action == "show_goals":
-            cmd_goals(argparse.Namespace(add=False, title=[], dimension=None))
-
-        elif action == "delete_goal":
-            _delete_goal_by_hint(args.get("task_title_hint"))
-
-        elif action == "add_goal":
-            text_val = args.get("text") or text
-            _triage_capture(text_val)
-
-        elif action == "show_decisions":
-            cmd_decisions(argparse.Namespace())
-
-        elif action == "show_backlog":
-            cmd_backlog(argparse.Namespace())
-
-        elif action == "show_horizon":
-            cmd_horizon(argparse.Namespace())
-
-        elif action == "show_okrs":
-            cmd_okrs(argparse.Namespace())
-
-        elif action == "show_slow_burns":
-            cmd_slow_burns(argparse.Namespace(add=False))
-
-        elif action == "run_research":
-            query = args.get("query") or text
-            cmd_research(argparse.Namespace(topic=query.split()))
-
-        elif action == "run_find":
-            query = args.get("query") or text
-            cmd_find(argparse.Namespace(query=query.split()))
-
-        elif action == "show_calendar":
-            cmd_calendar(argparse.Namespace(add=False, delete=False))
-
-        elif action in ("show_constitution", "show_values"):
-            cmd_constitution(argparse.Namespace())
-
-        elif action == "show_dashboard":
-            from viyugam.dashboard import run_dashboard
-            run_dashboard()
-
-        elif action == "help":
-            _show_help()
-
+        handler = _DISPATCH.get(action)
+        if handler:
+            handler(text, args, item)
         else:
             console.print(f"[dim]Unknown action: {action}[/dim]")
 

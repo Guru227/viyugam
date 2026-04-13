@@ -7,14 +7,18 @@ Computes: constraint scores, goal trajectories, nudges, and the single directive
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta
-from typing import Optional
+from typing import Literal
 
-from viyugam.models import (
-    Task, Goal, Nudge, NudgeType, PriorityContext,
-    TaskStatus, Dimension, Trajectory,
-)
 import viyugam.storage as storage
-
+from viyugam.models import (
+    Goal,
+    Nudge,
+    NudgeType,
+    PriorityContext,
+    Task,
+    TaskStatus,
+    Trajectory,
+)
 
 # ── Scoring weights ───────────────────────────────────────────────────────────
 
@@ -315,28 +319,8 @@ def _quarter_end(d: date) -> date:
 
 # ── Nudge system ─────────────────────────────────────────────────────────────
 
-def compute_nudges(
-    tasks: list[Task] | None = None,
-    habits: list[Task] | None = None,
-    goals: list[Goal] | None = None,
-) -> list[Nudge]:
-    """Compute all nudges based on current system state. Deduplicates against dismissed.
-    Accepts pre-loaded data to avoid redundant disk reads."""
+def _nudge_deadline(tasks: list[Task], today: date, dismissed: set[str]) -> list[Nudge]:
     nudges: list[Nudge] = []
-    today = date.today()
-
-    # Load dismissed nudges for dedup
-    dismissed = _get_dismissed_keys()
-
-    # Use pre-loaded data or fall back to loading
-    if tasks is None:
-        tasks = storage.get_tasks(include_habits=False)
-    if habits is None:
-        habits = [t for t in storage.get_tasks(include_habits=True) if t.is_habit]
-    if goals is None:
-        goals = storage.get_goals(active_only=True)
-
-    # DEADLINE: tasks due within 2 days
     for t in tasks:
         if t.status == TaskStatus.DONE:
             continue
@@ -351,7 +335,7 @@ def compute_nudges(
         if days_until <= 2:
             key = f"{t.id}:{NudgeType.DEADLINE}"
             if key not in dismissed:
-                severity = "critical" if days_until < 0 else ("warn" if days_until <= 1 else "info")
+                severity: Literal["info", "warn", "critical"] = "critical" if days_until < 0 else ("warn" if days_until <= 1 else "info")
                 label = f"overdue by {abs(days_until)}d" if days_until < 0 else (
                     "due today" if days_until == 0 else f"due in {days_until}d")
                 nudges.append(Nudge(
@@ -360,8 +344,11 @@ def compute_nudges(
                     message=f"'{t.title}' {label}",
                     severity=severity,
                 ))
+    return nudges
 
-    # STREAK: habits with broken streaks
+
+def _nudge_streak(habits: list[Task], today: date, dismissed: set[str]) -> list[Nudge]:
+    nudges: list[Nudge] = []
     for h in habits:
         if h.last_done and h.last_done < (today - timedelta(days=1)).isoformat():
             key = f"{h.id}:{NudgeType.STREAK}"
@@ -372,8 +359,11 @@ def compute_nudges(
                     message=f"'{h.title}' streak broken (last: {h.last_done})",
                     severity="warn",
                 ))
+    return nudges
 
-    # SNOOZE: tasks snoozed 3+ times
+
+def _nudge_snooze(tasks: list[Task], dismissed: set[str]) -> list[Nudge]:
+    nudges: list[Nudge] = []
     for t in tasks:
         if t.snooze_count >= 3 and t.status != TaskStatus.DONE:
             key = f"{t.id}:{NudgeType.SNOOZE}"
@@ -384,8 +374,11 @@ def compute_nudges(
                     message=f"'{t.title}' snoozed {t.snooze_count} times -- decide or delete",
                     severity="warn",
                 ))
+    return nudges
 
-    # GOAL_RISK: goals with at_risk or off_track trajectory
+
+def _nudge_goal_risk(goals: list[Goal], tasks: list[Task], dismissed: set[str]) -> list[Nudge]:
+    nudges: list[Nudge] = []
     non_pseudo_goals = [g for g in goals if not g.is_pseudo]
     trajectories = compute_goal_trajectories(non_pseudo_goals, tasks)
     for gt in trajectories:
@@ -393,15 +386,18 @@ def compute_nudges(
         if traj in (Trajectory.AT_RISK, Trajectory.OFF_TRACK):
             key = f"{gt['goal_id']}:{NudgeType.GOAL_RISK}"
             if key not in dismissed:
-                severity = "critical" if traj == Trajectory.OFF_TRACK else "warn"
+                severity: Literal["info", "warn", "critical"] = "critical" if traj == Trajectory.OFF_TRACK else "warn"
                 nudges.append(Nudge(
                     nudge_type=NudgeType.GOAL_RISK,
                     entity_id=gt["goal_id"],
                     message=f"Goal '{gt['title']}' {traj.value.replace('_', ' ')} ({gt['progress_pct']:.0f}%)",
                     severity=severity,
                 ))
+    return nudges
 
-    # BUDGET_DRIFT: budget >80% spent
+
+def _nudge_budget_drift(dismissed: set[str]) -> list[Nudge]:
+    nudges: list[Nudge] = []
     try:
         budgets = storage.get_budgets()
         for b in budgets:
@@ -417,8 +413,11 @@ def compute_nudges(
                     ))
     except Exception:
         pass
+    return nudges
 
-    # STALE_TASK: todo tasks older than 14 days with no activity
+
+def _nudge_stale_task(tasks: list[Task], today: date, dismissed: set[str]) -> list[Nudge]:
+    nudges: list[Nudge] = []
     for t in tasks:
         if t.status == TaskStatus.TODO:
             try:
@@ -435,8 +434,11 @@ def compute_nudges(
                         ))
             except (ValueError, TypeError):
                 pass
+    return nudges
 
-    # SEASON_DRIFT: actual vs intended season misalignment
+
+def _nudge_season_drift(dismissed: set[str]) -> list[Nudge]:
+    nudges: list[Nudge] = []
     try:
         config = storage.load_config()
         drift = storage.get_season_drift(config)
@@ -451,7 +453,35 @@ def compute_nudges(
                 ))
     except Exception:
         pass
+    return nudges
 
+
+def compute_nudges(
+    tasks: list[Task] | None = None,
+    habits: list[Task] | None = None,
+    goals: list[Goal] | None = None,
+) -> list[Nudge]:
+    """Compute all nudges based on current system state. Deduplicates against dismissed.
+    Accepts pre-loaded data to avoid redundant disk reads."""
+    today = date.today()
+
+    dismissed = _get_dismissed_keys()
+
+    if tasks is None:
+        tasks = storage.get_tasks(include_habits=False)
+    if habits is None:
+        habits = [t for t in storage.get_tasks(include_habits=True) if t.is_habit]
+    if goals is None:
+        goals = storage.get_goals(active_only=True)
+
+    nudges: list[Nudge] = []
+    nudges.extend(_nudge_deadline(tasks, today, dismissed))
+    nudges.extend(_nudge_streak(habits, today, dismissed))
+    nudges.extend(_nudge_snooze(tasks, dismissed))
+    nudges.extend(_nudge_goal_risk(goals, tasks, dismissed))
+    nudges.extend(_nudge_budget_drift(dismissed))
+    nudges.extend(_nudge_stale_task(tasks, today, dismissed))
+    nudges.extend(_nudge_season_drift(dismissed))
     return nudges
 
 

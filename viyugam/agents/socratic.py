@@ -3,21 +3,11 @@ agents/socratic.py — Socratic values session for Viyugam.
 Used in quarterly review (L4) to update values.yaml.
 """
 from __future__ import annotations
+
 import json
-import os
-from typing import Optional
 
-import anthropic
-
+from viyugam.engine.client import get_client, text_of
 from viyugam.pii import redact
-
-
-def _client() -> anthropic.Anthropic:
-    api_key = os.environ.get("ANTHROPIC_API_KEY")
-    if not api_key:
-        raise RuntimeError("ANTHROPIC_API_KEY not set.")
-    return anthropic.Anthropic(api_key=api_key)
-
 
 SYNTHESIZE_SYSTEM = """You are analysing journal entries from a quarterly review to find cross-dimension patterns.
 Be direct and specific. Reference actual language from the journals.
@@ -32,7 +22,7 @@ def synthesize_patterns(journal_entries: list[dict], current_values: dict) -> st
     if not journal_entries:
         return "Insufficient journal data for pattern synthesis."
 
-    client = _client()
+    get_client()
     entries_text = "\n\n".join(
         f"[{e.get('dimension', '?')} — {e.get('date', '')}]\n{e.get('content', '')}"
         for e in journal_entries[:12]
@@ -40,13 +30,13 @@ def synthesize_patterns(journal_entries: list[dict], current_values: dict) -> st
     prayer = current_values.get("prayer", "")
     context = f"User prayer/values:\n{prayer}\n\nJournal entries:\n{entries_text}" if prayer else f"Journal entries:\n{entries_text}"
 
-    response = _client().messages.create(
+    response = get_client().messages.create(
         model="claude-sonnet-4-6",
         max_tokens=400,
         system=SYNTHESIZE_SYSTEM,
-        messages=[{"role": "user", "content": redact(context)}],
+        messages=[{"role": "user", "content": redact(context)}],  # type: ignore[arg-type]
     )
-    return response.content[0].text.strip()
+    return text_of(response).strip()
 
 
 SOCRATIC_QUESTION_SYSTEM = """You are running a Socratic values session for Viyugam.
@@ -63,7 +53,7 @@ def next_question(patterns: str, conversation_so_far: list[dict]) -> tuple[str, 
     Generate next Socratic question from patterns.
     Returns (question, is_complete).
     """
-    client = _client()
+    client = get_client()
     messages = list(conversation_so_far)
     context = f"Patterns:\n{patterns}"
     if messages:
@@ -75,9 +65,9 @@ def next_question(patterns: str, conversation_so_far: list[dict]) -> tuple[str, 
         model="claude-sonnet-4-6",
         max_tokens=200,
         system=SOCRATIC_QUESTION_SYSTEM,
-        messages=messages,
+        messages=messages,  # type: ignore[arg-type]
     )
-    text = response.content[0].text.strip()
+    text = text_of(response).strip()
     complete = "[SESSION_COMPLETE]" in text
     text = text.replace("[SESSION_COMPLETE]", "").strip()
     return text, complete
@@ -105,7 +95,7 @@ def draft_values_diff(current_values: dict, conversation: list[dict]) -> dict:
     Propose changes to values.yaml based on Socratic conversation.
     Returns proposed diff dict.
     """
-    client = _client()
+    client = get_client()
     current_text = f"Current values:\n{json.dumps(current_values, ensure_ascii=False, indent=2)[:1000]}"
     conversation_text = "\n".join(
         f"{'Viyugam' if m['role']=='assistant' else 'User'}: {m['content']}"
@@ -117,9 +107,9 @@ def draft_values_diff(current_values: dict, conversation: list[dict]) -> dict:
         model="claude-sonnet-4-6",
         max_tokens=800,
         system=VALUES_DIFF_SYSTEM,
-        messages=[{"role": "user", "content": redact(msg)}],
+        messages=[{"role": "user", "content": redact(msg)}],  # type: ignore[arg-type]
     )
-    text = response.content[0].text.strip()
+    text = text_of(response).strip()
     if text.startswith("```"):
         text = text.split("\n", 1)[1].rsplit("```", 1)[0].strip()
     try:

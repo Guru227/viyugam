@@ -4,18 +4,10 @@ Conversational session to clarify OKRs, refine success criteria, and
 align a goal to the current season and dimension focus.
 """
 from __future__ import annotations
+
 import json
-import os
 
-import anthropic
-
-
-def _client() -> anthropic.Anthropic:
-    api_key = os.environ.get("ANTHROPIC_API_KEY")
-    if not api_key:
-        raise RuntimeError("ANTHROPIC_API_KEY not set.")
-    return anthropic.Anthropic(api_key=api_key)
-
+from viyugam.engine.client import get_client, text_of
 
 GOAL_PLAN_SYSTEM = """\
 You are a goal clarity collaborator helping someone sharpen a goal and its OKRs.
@@ -93,17 +85,17 @@ def start_goal_plan_session(goal: dict, existing_okrs: list[dict] | None = None,
         projects or [],
         values or {},
     )
-    client = _client()
+    client = get_client()
     response = client.messages.create(
         model="claude-sonnet-4-6",
         max_tokens=600,
         system=GOAL_PLAN_SYSTEM,
-        messages=[{
+        messages=[{  # type: ignore[arg-type]
             "role": "user",
             "content": f"Let's clarify this goal and its OKRs.\n\n{ctx}",
         }],
     )
-    return response.content[0].text.strip()
+    return text_of(response).strip()
 
 
 def goal_plan_turn(history: list[dict], user_message: str,
@@ -118,14 +110,14 @@ def goal_plan_turn(history: list[dict], user_message: str,
     is_done = any(kw in tl for kw in done_kw)
 
     messages = list(history) + [{"role": "user", "content": user_message}]
-    client = _client()
+    client = get_client()
     response = client.messages.create(
         model="claude-sonnet-4-6",
         max_tokens=800,
         system=GOAL_PLAN_SYSTEM,
-        messages=messages,
+        messages=messages,  # type: ignore[arg-type]
     )
-    reply = response.content[0].text.strip()
+    reply = text_of(response).strip()
     return reply, is_done
 
 
@@ -159,13 +151,13 @@ Return ONLY valid JSON with this structure:
 If information wasn't discussed, use empty string / empty list as defaults.
 Key results: 2-4 max, each concrete and measurable."""
 
-    client = _client()
+    client = get_client()
     response = client.messages.create(
         model="claude-sonnet-4-6",
         max_tokens=800,
-        messages=[{"role": "user", "content": extraction_prompt}],
+        messages=[{"role": "user", "content": extraction_prompt}],  # type: ignore[arg-type]
     )
-    text = response.content[0].text.strip()
+    text = text_of(response).strip()
     if text.startswith("```"):
         text = text.split("\n", 1)[1].rsplit("```", 1)[0].strip()
     try:

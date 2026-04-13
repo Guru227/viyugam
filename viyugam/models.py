@@ -1,9 +1,11 @@
 from __future__ import annotations
-from datetime import date, datetime
-from enum import Enum
-from typing import Literal, Optional, List
-from pydantic import BaseModel, Field, model_validator
+
 import uuid
+from datetime import datetime
+from enum import Enum
+from typing import Literal, Optional
+
+from pydantic import BaseModel, Field, model_validator
 
 
 def new_id() -> str:

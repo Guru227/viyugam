@@ -4,21 +4,11 @@ Runs the conversational journaling session.
 Dual voice: Observer + Encourager.
 """
 from __future__ import annotations
+
 import json
-import os
-from typing import Optional
 
-import anthropic
-
+from viyugam.engine.client import get_client, text_of
 from viyugam.pii import redact
-
-
-def _client() -> anthropic.Anthropic:
-    api_key = os.environ.get("ANTHROPIC_API_KEY")
-    if not api_key:
-        raise RuntimeError("ANTHROPIC_API_KEY not set.")
-    return anthropic.Anthropic(api_key=api_key)
-
 
 # ── Coach system prompt ────────────────────────────────────────────────────────
 
@@ -113,7 +103,7 @@ def get_opener(user_name: str, context: str, today_tasks: list[dict],
     if memory_context:
         full_context += f" [{memory_context[:200]}]"
 
-    client = _client()
+    client = get_client()
     response = client.messages.create(
         model="claude-sonnet-4-6",
         max_tokens=150,
@@ -121,9 +111,9 @@ def get_opener(user_name: str, context: str, today_tasks: list[dict],
             user_name=user_name,
             context=full_context.strip() or "No specific context available.",
         ),
-        messages=[{"role": "user", "content": "Generate the opening question."}],
+        messages=[{"role": "user", "content": "Generate the opening question."}],  # type: ignore[arg-type]
     )
-    return response.content[0].text.strip().strip('"')
+    return text_of(response).strip().strip('"')
 
 
 def chat_turn(
@@ -138,7 +128,7 @@ def chat_turn(
     Send one turn of the journaling conversation.
     Returns (coach_response, is_ready_to_save).
     """
-    client = _client()
+    client = get_client()
 
     system = COACH_SYSTEM
     if season_context:
@@ -165,10 +155,10 @@ def chat_turn(
         model="claude-sonnet-4-6",
         max_tokens=500,
         system=system,
-        messages=messages,
+        messages=messages,  # type: ignore[arg-type]
     )
 
-    text = response.content[0].text.strip()
+    text = text_of(response).strip()
     ready = "[READY_TO_SAVE]" in text
     clean_text = text.replace("[READY_TO_SAVE]", "").strip()
 
@@ -186,12 +176,12 @@ def generate_summary(conversation: list[dict], today: str,
         role = "Coach" if msg["role"] == "assistant" else "You"
         conv_text += f"\n{role}: {msg['content']}\n"
 
-    client = _client()
+    client = get_client()
     response = client.messages.create(
         model="claude-sonnet-4-6",
         max_tokens=1000,
         system="You generate structured JSON summaries of journaling conversations. Return only valid JSON.",
-        messages=[{
+        messages=[{  # type: ignore[arg-type]
             "role": "user",
             "content": SUMMARY_SYSTEM.format(
                 conversation=conv_text,
@@ -200,7 +190,7 @@ def generate_summary(conversation: list[dict], today: str,
         }],
     )
 
-    text = response.content[0].text.strip()
+    text = text_of(response).strip()
     if text.startswith("```"):
         text = text.split("\n", 1)[1].rsplit("```", 1)[0].strip()
 

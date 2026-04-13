@@ -4,20 +4,11 @@ Three-voice debate: Vision, Resource, Risk.
 Used by the think command for significant decisions.
 """
 from __future__ import annotations
+
 import json
-import os
 
-import anthropic
-
+from viyugam.engine.client import get_client, text_of
 from viyugam.pii import redact
-
-
-def _client() -> anthropic.Anthropic:
-    api_key = os.environ.get("ANTHROPIC_API_KEY")
-    if not api_key:
-        raise RuntimeError("ANTHROPIC_API_KEY not set.")
-    return anthropic.Anthropic(api_key=api_key)
-
 
 BOARDROOM_SYSTEM = """You are facilitating a Board Meeting for a personal life decision.
 
@@ -149,15 +140,15 @@ def run_debate(
 {constitution_section}{memory_section}{finance_section}{premortem_section}
 Run the board meeting."""
 
-    client = _client()
+    client = get_client()
     response = client.messages.create(
         model="claude-sonnet-4-6",
         max_tokens=1200,
         system=BOARDROOM_SYSTEM,
-        messages=[{"role": "user", "content": user_content}],
+        messages=[{"role": "user", "content": user_content}],  # type: ignore[arg-type]
     )
 
-    text = response.content[0].text.strip()
+    text = text_of(response).strip()
     if text.startswith("```"):
         text = text.split("\n", 1)[1].rsplit("```", 1)[0].strip()
 

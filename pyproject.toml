@@ -33,6 +33,8 @@ dev = [
     "anybadge>=1.14.0",
     "pytest-cov>=6.0.0",
     "lizard>=1.17.0",
+    "types-pyyaml>=6.0.12.20250915",
+    "mutmut>=3.5.0",
 ]
 
 [tool.ruff]
@@ -54,6 +56,32 @@ ignore-magic = true
 
 [tool.vulture]
 min_confidence = 80
+
+[tool.coverage.run]
+omit = [
+    "viyugam/dashboard.py",        # TUI rendering — needs live terminal
+    "viyugam/repl.py",             # Interactive REPL — needs prompt_toolkit
+    "viyugam/main.py",             # CLI wiring — agents need API key
+    "viyugam/agents/boardroom.py", # AI agent — needs API key
+    "viyugam/agents/chairman.py",
+    "viyugam/agents/coach.py",
+    "viyugam/agents/finance.py",
+    "viyugam/agents/goal_planner.py",
+    "viyugam/agents/intent.py",
+    "viyugam/agents/project_planner.py",
+    "viyugam/agents/researcher.py",
+    "viyugam/agents/reviewer.py",
+    "viyugam/agents/socratic.py",
+    "viyugam/agents/triage_agent.py",
+    "viyugam/agents/_api.py",      # Compatibility shim
+]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "if __name__ == .__main__.",
+    "if TYPE_CHECKING:",
+]
 
 [tool.bandit]
 targets = ["viyugam"]

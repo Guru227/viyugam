@@ -4,18 +4,10 @@ Analyses budget data, cashflow, and recurring items.
 Returns structured insights with wealth score.
 """
 from __future__ import annotations
+
 import json
-import os
 
-import anthropic
-
-
-def _client() -> anthropic.Anthropic:
-    api_key = os.environ.get("ANTHROPIC_API_KEY")
-    if not api_key:
-        raise RuntimeError("ANTHROPIC_API_KEY not set.")
-    return anthropic.Anthropic(api_key=api_key)
-
+from viyugam.engine.client import get_client, text_of
 
 FINANCE_SYSTEM = """You are a direct, numbers-first financial analyst for a personal Life OS.
 
@@ -89,15 +81,15 @@ def analyze_finance(
 {constitution_section}
 Analyse the financial situation."""
 
-    client = _client()
+    client = get_client()
     response = client.messages.create(
         model="claude-sonnet-4-6",
         max_tokens=800,
         system=FINANCE_SYSTEM,
-        messages=[{"role": "user", "content": user_content}],
+        messages=[{"role": "user", "content": user_content}],  # type: ignore[arg-type]
     )
 
-    text = response.content[0].text.strip()
+    text = text_of(response).strip()
     if text.startswith("```"):
         text = text.split("\n", 1)[1].rsplit("```", 1)[0].strip()
 

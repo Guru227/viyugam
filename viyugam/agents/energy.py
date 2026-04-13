@@ -4,13 +4,12 @@ Reads recent journal entries and extracts the user's personal energy model.
 Cached for 3 days to avoid repeated API calls.
 """
 from __future__ import annotations
+
 import json
-import os
-from datetime import date, timedelta
+from datetime import date
 from pathlib import Path
 
-import anthropic
-
+from viyugam.engine.client import get_client, text_of
 
 ENERGY_SYSTEM = """You are an analyst reading someone's journal entries to understand their personal energy patterns.
 
@@ -29,13 +28,6 @@ Return ONLY a JSON object:
 If there is insufficient data to determine something, use null for that field."""
 
 
-def _client() -> anthropic.Anthropic:
-    api_key = os.environ.get("ANTHROPIC_API_KEY")
-    if not api_key:
-        raise RuntimeError("ANTHROPIC_API_KEY not set.")
-    return anthropic.Anthropic(api_key=api_key)
-
-
 def analyze_energy_patterns(journal_entries: list[tuple[str, str]]) -> dict:
     """
     journal_entries: list of (date_str, markdown_content) tuples, newest first.
@@ -48,14 +40,14 @@ def analyze_energy_patterns(journal_entries: list[tuple[str, str]]) -> dict:
     for d, text in journal_entries[:14]:
         content += f"\n--- {d} ---\n{text[:600]}\n"
 
-    client = _client()
+    client = get_client()
     response = client.messages.create(
         model="claude-sonnet-4-6",
         max_tokens=600,
         system=ENERGY_SYSTEM,
-        messages=[{"role": "user", "content": f"Journal entries:\n{content}"}],
+        messages=[{"role": "user", "content": f"Journal entries:\n{content}"}],  # type: ignore[arg-type]
     )
-    text = response.content[0].text.strip()
+    text = text_of(response).strip()
     if text.startswith("```"):
         text = text.split("\n", 1)[1].rsplit("```", 1)[0].strip()
     return json.loads(text)

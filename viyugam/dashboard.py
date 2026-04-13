@@ -18,6 +18,8 @@ from __future__ import annotations
 import argparse
 import contextlib
 import io
+import re as _re
+import re as _re_cmd
 import threading
 import time
 from dataclasses import dataclass, field
@@ -30,7 +32,11 @@ from prompt_toolkit.filters import Condition
 from prompt_toolkit.formatted_text import ANSI, FormattedText
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.layout import (
-    ConditionalContainer, HSplit, Layout, VSplit, Window,
+    ConditionalContainer,
+    HSplit,
+    Layout,
+    VSplit,
+    Window,
 )
 from prompt_toolkit.layout.controls import BufferControl, FormattedTextControl
 from prompt_toolkit.layout.dimension import D
@@ -38,6 +44,7 @@ from prompt_toolkit.styles import Style
 from rich.console import Console as RichConsole
 
 import viyugam.storage as storage
+from viyugam.models import TaskStatus
 
 # ── Constants ──────────────────────────────────────────────────────────────────
 
@@ -276,6 +283,105 @@ def _section_calendar(L, B, start_date, end_date, label: str,
 
 # ── Panel: GPS ─────────────────────────────────────────────────────────────────
 
+def _gps_now_section(ctx, lines, L, B):
+    L(_t("label", "  NOW"))
+    lines.append(_div())
+    if ctx.directive_task:
+        dt = ctx.directive_task
+        seq = dt.get("seq_id") or ""
+        title = dt.get("title", "")
+        L(_t("accent", f"  {title}"))
+        if seq:
+            L(_t("dim", f"  [{seq}]"))
+
+        proj_str = ""
+        if dt.get("project_id"):
+            projs = storage.get_projects()
+            proj = next((p for p in projs if p.id == dt["project_id"]), None)
+            if proj:
+                proj_str = f"Project: {proj.seq_id or proj.title[:20]}"
+        goal_str = ""
+        if dt.get("aligns_to"):
+            goals = storage.get_goals(active_only=False)
+            for gid in dt["aligns_to"][:2]:
+                g = next((gg for gg in goals if gg.id == gid), None)
+                if g:
+                    goal_str += f"  Goal: {g.seq_id or g.title[:20]}"
+        if proj_str or goal_str:
+            L(_t("dim", f"  {proj_str}{goal_str}"))
+
+        if ctx.why_bottleneck:
+            L(_t("dim", f"  Why: {ctx.why_bottleneck}"))
+        if ctx.unblocks:
+            L(_t("dim", f"  Unblocks: {', '.join(ctx.unblocks[:3])}"))
+
+        energy = dt.get("energy_cost", 5)
+        mins = dt.get("estimated_minutes", 30)
+        due = dt.get("due") or dt.get("scheduled_date") or ""
+        info = f"  Energy: {energy}/10  ~{mins}m"
+        if due:
+            info += f"  Due: {due}"
+        L(_t("dim", info))
+    else:
+        L(_t("dim", "  No active tasks. Capture something to get started."))
+    B()
+
+
+def _gps_nudges_section(ctx, lines, L, B):
+    if not ctx.nudges:
+        return
+    L(_t("label", "  NUDGES"))
+    lines.append(_div())
+    for n in ctx.nudges[:6]:
+        if n.severity == "critical":
+            marker, sty = "!", "overdue"
+        elif n.severity == "warn":
+            marker, sty = "!", "warn"
+        else:
+            marker, sty = ".", "dim"
+        L(_t(sty, f"  {marker} {n.message}"))
+    B()
+
+
+def _gps_goals_section(ctx, focus, lines, L, B):
+    if not ctx.goal_trajectories:
+        return
+    L(_t("label", "  GOALS"))
+    lines.append(_div())
+    for gt in ctx.goal_trajectories:
+        dim_str = gt.get("dimension")
+        if focus != "all" and dim_str is not None:
+            if focus == "work" and dim_str not in WORK_DIMS:
+                continue
+            elif focus != "work" and dim_str != focus:
+                continue
+        pct = gt.get("progress_pct", 0)
+        bar = _pct_bar(int(pct), width=10)
+        seq = gt.get("seq_id") or ""
+        title = gt.get("title", "")[:24]
+        traj = gt.get("trajectory", "")
+        traj_val = traj.value if hasattr(traj, "value") else str(traj)
+        arrow = {"on_track": "+", "at_risk": "~", "off_track": "-"}.get(traj_val, " ")
+        row = [_t("dim", f"  {seq:<6} {title:<24} ")]
+        row.extend(bar)
+        row.append(_t("dim", f" {pct:>5.0f}%  {arrow}"))
+        lines.append(row)
+    B()
+
+
+def _gps_patterns_section(lines, L, B):
+    try:
+        patterns = storage.get_patterns(precipitated_only=True)
+        if patterns:
+            L(_t("label", "  PATTERNS"))
+            lines.append(_div())
+            for p in patterns[:4]:
+                L(_t("dim", f"  . {p.pattern}"))
+            B()
+    except Exception:
+        pass
+
+
 def _build_gps(focus: str) -> list[list]:
     """GPS panel -- one directive, nudges, goal trajectories, patterns.
     All data from priority.get_context() -- no Claude calls, instant render."""
@@ -286,106 +392,12 @@ def _build_gps(focus: str) -> list[list]:
 
     try:
         from viyugam.priority import get_context
-
         ctx = get_context()
 
-        # -- NOW: directive task --
-        L(_t("label", "  NOW"))
-        lines.append(_div())
-        if ctx.directive_task:
-            dt = ctx.directive_task
-            seq = dt.get("seq_id") or ""
-            title = dt.get("title", "")
-            L(_t("accent", f"  {title}"))
-            if seq:
-                L(_t("dim", f"  [{seq}]"))
-
-            # Project & Goal context
-            proj_str = ""
-            if dt.get("project_id"):
-                projs = storage.get_projects()
-                proj = next((p for p in projs if p.id == dt["project_id"]), None)
-                if proj:
-                    proj_str = f"Project: {proj.seq_id or proj.title[:20]}"
-            goal_str = ""
-            if dt.get("aligns_to"):
-                goals = storage.get_goals(active_only=False)
-                for gid in dt["aligns_to"][:2]:
-                    g = next((gg for gg in goals if gg.id == gid), None)
-                    if g:
-                        goal_str += f"  Goal: {g.seq_id or g.title[:20]}"
-            if proj_str or goal_str:
-                L(_t("dim", f"  {proj_str}{goal_str}"))
-
-            # Why this task
-            if ctx.why_bottleneck:
-                L(_t("dim", f"  Why: {ctx.why_bottleneck}"))
-
-            # Unblocks
-            if ctx.unblocks:
-                L(_t("dim", f"  Unblocks: {', '.join(ctx.unblocks[:3])}"))
-
-            # Energy + time + due
-            energy = dt.get("energy_cost", 5)
-            mins = dt.get("estimated_minutes", 30)
-            due = dt.get("due") or dt.get("scheduled_date") or ""
-            info = f"  Energy: {energy}/10  ~{mins}m"
-            if due:
-                info += f"  Due: {due}"
-            L(_t("dim", info))
-        else:
-            L(_t("dim", "  No active tasks. Capture something to get started."))
-        B()
-
-        # -- NUDGES --
-        if ctx.nudges:
-            L(_t("label", "  NUDGES"))
-            lines.append(_div())
-            for n in ctx.nudges[:6]:
-                if n.severity == "critical":
-                    marker, sty = "!", "overdue"
-                elif n.severity == "warn":
-                    marker, sty = "!", "warn"
-                else:
-                    marker, sty = ".", "dim"
-                L(_t(sty, f"  {marker} {n.message}"))
-            B()
-
-        # -- GOALS --
-        if ctx.goal_trajectories:
-            L(_t("label", "  GOALS"))
-            lines.append(_div())
-            for gt in ctx.goal_trajectories:
-                dim_str = gt.get("dimension")
-                if focus != "all" and dim_str is not None:
-                    if focus == "work" and dim_str not in WORK_DIMS:
-                        continue
-                    elif focus != "work" and dim_str != focus:
-                        continue
-                pct = gt.get("progress_pct", 0)
-                bar = _pct_bar(int(pct), width=10)
-                seq = gt.get("seq_id") or ""
-                title = gt.get("title", "")[:24]
-                traj = gt.get("trajectory", "")
-                traj_val = traj.value if hasattr(traj, "value") else str(traj)
-                arrow = {"on_track": "+", "at_risk": "~", "off_track": "-"}.get(traj_val, " ")
-                row = [_t("dim", f"  {seq:<6} {title:<24} ")]
-                row.extend(bar)
-                row.append(_t("dim", f" {pct:>5.0f}%  {arrow}"))
-                lines.append(row)
-            B()
-
-        # -- PATTERNS --
-        try:
-            patterns = storage.get_patterns(precipitated_only=True)
-            if patterns:
-                L(_t("label", "  PATTERNS"))
-                lines.append(_div())
-                for p in patterns[:4]:
-                    L(_t("dim", f"  . {p.pattern}"))
-                B()
-        except Exception:
-            pass
+        _gps_now_section(ctx, lines, L, B)
+        _gps_nudges_section(ctx, lines, L, B)
+        _gps_goals_section(ctx, focus, lines, L, B)
+        _gps_patterns_section(lines, L, B)
 
     except Exception as e:
         lines.append([_t("overdue", f"  GPS error: {e}")])
@@ -457,11 +469,11 @@ def _build_strategic(focus: str) -> list[list]:
         L(_t("label", "  DIMENSIONS  (14-day avg, 0–10)"))
         scores = storage.get_avg_dimension_scores(days=14)
         if scores:
-            for s in sorted(scores, key=lambda x: -x["score"]):
-                bar = _pct_bar(int(s["score"] * 10), width=14)
-                row = [_t("dim", f"  {s['dimension']:<12} ")]
+            for ds in sorted(scores, key=lambda x: -x["score"]):
+                bar = _pct_bar(int(ds["score"] * 10), width=14)
+                row = [_t("dim", f"  {ds['dimension']:<12} ")]
                 row.extend(bar)
-                row.append(_t("dim", f"  {s['score']:.1f}"))
+                row.append(_t("dim", f"  {ds['score']:.1f}"))
                 lines.append(row)
         else:
             # Fallback: task count per dimension
@@ -548,7 +560,7 @@ def _build_tactical(focus: str) -> list[list]:
     def B():      lines.append(_blank())
 
     try:
-        from viyugam.models import ProjectStatus, TaskStatus
+        from viyugam.models import ProjectStatus
 
         config        = storage.load_config()
         quarter       = storage.get_current_quarter()
@@ -571,7 +583,7 @@ def _build_tactical(focus: str) -> list[list]:
                   and _visible(p.dimension, focus)]
         L(_t("label", f"  PROJECTS  ({len(active)} active)"))
         if active:
-            proj_milestones = {}
+            proj_milestones: dict = {}
             for m in milestones:
                 if m.project_id and not m.is_done and (m.due_date or "") >= today:
                     prev = proj_milestones.get(m.project_id)
@@ -643,9 +655,9 @@ def _build_tactical(focus: str) -> list[list]:
         # ── Milestones ──
         upcoming = sorted(
             [m for m in milestones
-             if getattr(m, "due_date", None) and m.due_date >= today
+             if getattr(m, "due_date", None) and m.due_date is not None and m.due_date >= today
              and not getattr(m, "done", False)],
-            key=lambda m: m.due_date,
+            key=lambda m: m.due_date or "",
         )
         if upcoming:
             L(_t("label", "  MILESTONES"))
@@ -702,7 +714,7 @@ def _build_daily(focus: str, staging: bool) -> list[list]:
     def B():      lines.append(_blank())
 
     try:
-        from viyugam.models import TaskStatus, ProjectStatus
+        from viyugam.models import ProjectStatus, TaskStatus
 
         today = date.today().isoformat()
         now   = datetime.now()
@@ -711,7 +723,7 @@ def _build_daily(focus: str, staging: bool) -> list[list]:
         habits      = storage.get_habits()
         all_tasks   = storage.get_tasks(include_habits=False)
         state       = storage.load_state()
-        inbox       = storage.get_inbox(unprocessed_only=True)
+        storage.get_inbox(unprocessed_only=True)
         triage_unprocessed = storage.get_triage(unprocessed_only=True)
 
         overdue = [
@@ -879,8 +891,8 @@ def _build_daily(focus: str, staging: bool) -> list[list]:
         try:
             triage_sty = "warn" if triage_unprocessed else "dim"
             L(_t(triage_sty, f"  Triage: {len(triage_unprocessed)} unprocessed"))
-            for item in triage_unprocessed[:3]:
-                L(_t("dim", f"  ·  {item.content[:40]}"))
+            for triage_item in triage_unprocessed[:3]:
+                L(_t("dim", f"  ·  {triage_item.content[:40]}"))
             B()
         except Exception:
             pass
@@ -992,7 +1004,7 @@ def _build_review_panel(session: Optional[dict]) -> list[list]:
         tasks = storage.get_tasks(include_habits=False)
         done_tasks  = [t for t in tasks if getattr(t, "status", None) and "done" in str(t.status).lower()]
         open_tasks  = [t for t in tasks if not (getattr(t, "status", None) and "done" in str(t.status).lower())]
-        L(_t("label", f"  TASKS"))
+        L(_t("label", "  TASKS"))
         if done_tasks:
             for t in done_tasks[:5]:
                 L(_t("done", f"  \u2713  {t.title[:44]}"))
@@ -1083,8 +1095,6 @@ def _build_research(jobs: list) -> list[list]:
 
 # ── ANSI sanitiser ─────────────────────────────────────────────────────────────
 
-import re as _re
-
 # Matches cursor-movement / screen-manipulation CSI sequences but NOT SGR (color)
 # codes (which end in 'm').  These must not be replayed inside the chat pane.
 _CURSOR_RE = _re.compile(
@@ -1135,15 +1145,15 @@ def _capture_rich(width: int = 60):
     # Prevent Prompt.ask() / Confirm.ask() from blocking stdin in a background
     # thread.  The lambda previously used was missing keyword-only args, causing
     # TypeError that let the real console.input() run and corrupt the terminal.
-    def _no_input(prompt="", *, markup=True, emoji=True, password=False, stream=None):
+    def _no_input(_prompt="", **_kwargs):
         raise EOFError("dashboard: non-interactive")
-    cap.input = _no_input
+    cap.input = _no_input  # type: ignore[method-assign,assignment]
 
     old = {}
     for mod in (_m, _r):
         if hasattr(mod, "console"):
             old[mod] = mod.console
-            mod.console = cap
+            mod.console = cap  # type: ignore[attr-defined]
 
     import sys as _sys
     old_stdin = _sys.stdin
@@ -1153,7 +1163,7 @@ def _capture_rich(width: int = 60):
     finally:
         _sys.stdin = old_stdin
         for mod, c in old.items():
-            mod.console = c
+            mod.console = c  # type: ignore[attr-defined]
 
 
 # ── Background command runner ──────────────────────────────────────────────────
@@ -1313,10 +1323,10 @@ def _start_review_session(cadence: str, state: "_State", app: Application) -> No
         opening_ctx = (
             f"Starting {cadence} review. "
             f"Period: {review_data.get('period_start','?')} – {review_data.get('period_end','?')}. "
-            f"Goals: {', '.join(review_data.get('goals',[])[:3]) or 'none set'}. "
-            f"Completed this period: {', '.join(review_data.get('completed_tasks',[])[:3]) or 'none logged'}."
+            f"Goals: {', '.join(list(review_data.get('goals',[]))[:3]) or 'none set'}. "
+            f"Completed this period: {', '.join(list(review_data.get('completed_tasks',[]))[:3]) or 'none logged'}."
         )
-        history = []
+        history: list[dict[str, str]] = []
         opening, _ = rev.retro_turn(history, opening_ctx, cadence, review_data)
         history.append({"role": "assistant", "content": opening})
 
@@ -1459,8 +1469,8 @@ def _start_project_plan_session(project_id: str, state: "_State",
 def _project_plan_turn(text: str, tl: str, session: dict, state: "_State",
                        app: Application) -> None:
     """Handle one turn of the project planning conversation."""
-    from viyugam.agents.project_planner import project_plan_turn, extract_project_plan
-    from viyugam.models import ProjectPlan, Milestone
+    from viyugam.agents.project_planner import extract_project_plan, project_plan_turn
+    from viyugam.models import Milestone, ProjectPlan
 
     history = session.get("history", [])
     history.append({"role": "user", "content": text})
@@ -1513,7 +1523,7 @@ def _project_plan_turn(text: str, tl: str, session: dict, state: "_State",
                 except Exception:
                     pass
 
-        summary = f"\u2713 Project plan saved."
+        summary = "\u2713 Project plan saved."
         if milestone_count:
             summary += f"  {milestone_count} milestone(s) added."
         _session_chat("system", summary, state, app)
@@ -1662,10 +1672,14 @@ def _task_confirm_phase(text: str, tl: str, session: dict, state: "_State",
 def _review_turn(text: str, tl: str, session: dict, state: "_State",
                  app: Application) -> None:
     phase = session["phase"]
-    if   phase == "retro":        _retro_phase(text, tl, session, state, app)
-    elif phase == "journal":      _journal_phase(text, tl, session, state, app)
-    elif phase == "task_confirm": _task_confirm_phase(text, tl, session, state, app)
-    elif phase == "plan":         _plan_turn(text, tl, session, state, app)
+    if phase == "retro":
+        _retro_phase(text, tl, session, state, app)
+    elif phase == "journal":
+        _journal_phase(text, tl, session, state, app)
+    elif phase == "task_confirm":
+        _task_confirm_phase(text, tl, session, state, app)
+    elif phase == "plan":
+        _plan_turn(text, tl, session, state, app)
 
 
 def _journal_open_dim(session: dict, state: "_State", app: Application) -> None:
@@ -1686,7 +1700,7 @@ def _journal_open_dim(session: dict, state: "_State", app: Application) -> None:
 
 def _render_plan_proposal(proposal: str, state: "_State", app: Application) -> None:
     """Render a structured plan proposal with colored priority bullets."""
-    lines = [l.strip() for l in proposal.split("\n") if l.strip()]
+    lines = [ln.strip() for ln in proposal.split("\n") if ln.strip()]
     for line in lines:
         lw = line.lower()
         if "priority 1" in lw[:20]:
@@ -1703,7 +1717,7 @@ def _render_plan_proposal(proposal: str, state: "_State", app: Application) -> N
 
 def _review_finish_journals(session: dict, state: "_State", app: Application) -> None:
     from viyugam.agents import reviewer as rev
-    cadence = session["cadence"]
+    session["cadence"]
 
     # ── Duration tracking ──
     elapsed_min = int((time.time() - session.get("start_time", time.time())) / 60)
@@ -1868,14 +1882,14 @@ def _chat_tokens(chat: list) -> list[tuple[str, str]]:
         elif role == "assistant":
             ansi_str = entry.get("ansi", "")
             if ansi_str:
-                out.extend(ANSI(ansi_str).__pt_formatted_text__())
+                out.extend(ANSI(ansi_str).__pt_formatted_text__())  # type: ignore[arg-type]
             out.append(("", "\n"))
         elif role == "system":
             out.append(("class:chat.system", f"  {entry['text']}"))
             out.append(("", "\n"))
         elif role == "section":
             out.append(("", "\n"))
-            out.append((f"class:chat.section", f"  {entry['text']}"))
+            out.append(("class:chat.section", f"  {entry['text']}"))
             out.append(("", "\n"))
         elif role in _PLAN_STYLES:
             out.append((f"class:{role}", f"  {entry['text']}"))
@@ -2136,8 +2150,6 @@ def _setup_keybindings(kb, state: "_State", input_buffer, stop_tick,
 
 
 # ── Modal mode helpers ────────────────────────────────────────────────────────
-
-import re as _re_cmd
 
 
 def _handle_blocks_cmd(src_seq: str, dst_seq: str, state: "_State", app: "Application") -> None:
@@ -2414,7 +2426,7 @@ def _build_plan_agenda(scope: str, focus: str) -> "list[list]":
     if scope in ("weekly", "quarterly"):
         try:
             goals = storage.get_goals()
-            active = [g for g in goals if g.status == "active"]
+            active = [g for g in goals if g.is_active]
             if active:
                 L(_t("label", f"  GOALS  ({len(active)} active)"))
                 for g in active[:5]:
@@ -2431,9 +2443,9 @@ def _build_plan_agenda(scope: str, focus: str) -> "list[list]":
         today = date.today()
         if scope == "daily":
             tasks = [t for t in storage.get_tasks(include_habits=False)
-                     if not t.is_done and (not t.due or t.due <= today.isoformat())]
+                     if t.status != TaskStatus.DONE and (not t.due or t.due <= today.isoformat())]
         else:
-            tasks = [t for t in storage.get_tasks(include_habits=False) if not t.is_done]
+            tasks = [t for t in storage.get_tasks(include_habits=False) if t.status != TaskStatus.DONE]
         tasks = tasks[:10]
         if tasks:
             L(_t("label", "  OPEN TASKS"))
@@ -2770,8 +2782,8 @@ def _build_rev_activity(scope: str, focus: str) -> "list[list]":
         since = (today - __import__("datetime").timedelta(days=lookback)).isoformat()
 
         tasks = storage.get_tasks(include_habits=False)
-        done_tasks = [t for t in tasks if t.is_done
-                      and (t.done_at or "") >= since]
+        done_tasks = [t for t in tasks if t.status == TaskStatus.DONE
+                      and (t.last_done or "") >= since]
 
         if done_tasks:
             L(_t("label", f"  COMPLETED  ({len(done_tasks)})"))
@@ -2795,10 +2807,10 @@ def _build_rev_activity(scope: str, focus: str) -> "list[list]":
         pass
 
     try:
-        projects = [p for p in storage.get_projects() if p.status == "active"]
-        if projects:
+        active_projects = [p for p in storage.get_projects() if p.status == "active"]
+        if active_projects:
             L(_t("label", "  PROJECT PROGRESS"))
-            for p in projects[:5]:
+            for p in active_projects[:5]:
                 pct = getattr(p, "progress", 0) or 0
                 filled = int(pct / 10)
                 bar = "█" * filled + "░" * (10 - filled)
@@ -2980,17 +2992,17 @@ def _build_proj_tasks(project_id: str, focus: str) -> "list[list]":
             L(_t("dim", f"  Project {project_id} not found."))
             return lines
 
-        tasks = storage.get_tasks(project_id=project.id, include_habits=False)
+        tasks = [t for t in storage.get_tasks(include_habits=False) if t.project_id == project.id]
         today = date.today()
         week_end = (today + __import__("datetime").timedelta(days=7)).isoformat()
 
-        week_tasks = [t for t in tasks if not t.is_done
+        week_tasks = [t for t in tasks if t.status != TaskStatus.DONE
                       and t.due and t.due <= week_end]
-        backlog    = [t for t in tasks if not t.is_done
+        backlog    = [t for t in tasks if t.status != TaskStatus.DONE
                       and (not t.due or t.due > week_end)]
         done       = sorted(
-            [t for t in tasks if t.is_done],
-            key=lambda x: x.done_at or "", reverse=True
+            [t for t in tasks if t.status == TaskStatus.DONE],
+            key=lambda x: x.last_done or "", reverse=True
         )
 
         L(_t("label", f"  {project.seq_id or project_id}  TASKS"))
@@ -3015,7 +3027,7 @@ def _build_proj_tasks(project_id: str, focus: str) -> "list[list]":
         if done:
             L(_t("label", f"  DONE  ({len(done)})"))
             for t in done[:5]:
-                date_str = f"  {(t.done_at or '')[:10]}" if t.done_at else ""
+                date_str = f"  {(t.last_done or '')[:10]}" if t.last_done else ""
                 L(_t("done", f"  {t.seq_id or '·'}  {t.title[:42]}\u2713{date_str}"))
             B()
 
@@ -3057,10 +3069,9 @@ def _build_proj_context(project_id: str, focus: str) -> "list[list]":
                     pct = getattr(linked, "progress", 0) or 0
                     filled = int(pct / 10)
                     bar = "█" * filled + "░" * (10 - filled)
-                    L(_t("body",  f"  {linked.seq_id or '—'}  {linked.title[:34]}  [{linked.status}]"))
+                    status_label = "active" if linked.is_active else "inactive"
+                    L(_t("body",  f"  {linked.seq_id or '—'}  {linked.title[:34]}  [{status_label}]"))
                     L(_t("dim",   f"  Progress: {pct:.0f}%  {bar}"))
-                    if linked.deadline:
-                        L(_t("dim", f"  Deadline: {linked.deadline}"))
                     B()
             except Exception:
                 pass
@@ -3070,10 +3081,10 @@ def _build_proj_context(project_id: str, focus: str) -> "list[list]":
             all_tasks     = storage.get_tasks(include_habits=False)
             today         = date.today()
             week_end      = (today + __import__("datetime").timedelta(days=7)).isoformat()
-            week_all      = [t for t in all_tasks if not t.is_done
+            week_all      = [t for t in all_tasks if t.status != TaskStatus.DONE
                              and t.due and t.due <= week_end]
             week_this     = [t for t in week_all if t.project_id == project.id]
-            total_active  = [t for t in all_tasks if not t.is_done]
+            total_active  = [t for t in all_tasks if t.status != TaskStatus.DONE]
             proj_active   = [t for t in total_active if t.project_id == project.id]
 
             L(_t("label", "  EFFORT ALLOCATION"))
@@ -3301,7 +3312,7 @@ def _build_goal_projects(goal_id: str, focus: str) -> "list[list]":
                 filled = int(pct / 10)
                 bar    = "█" * filled + "░" * (10 - filled)
                 wk     = [t for t in all_tasks if t.project_id == p.id
-                          and not t.is_done and t.due and t.due <= week_end]
+                          and t.status != TaskStatus.DONE and t.due and t.due <= week_end]
                 L(_t("body", f"  {p.seq_id or '·'}  {p.title[:30]}"))
                 L(_t("dim",  f"     {bar}  {pct:.0f}%   {len(wk)} tasks this week"))
             B()
@@ -3317,8 +3328,8 @@ def _build_goal_projects(goal_id: str, focus: str) -> "list[list]":
             B()
 
         goal_tasks  = [t for t in all_tasks
-                       if t.project_id in {p.id for p in linked} and not t.is_done]
-        total_open  = [t for t in all_tasks if not t.is_done]
+                       if t.project_id in {p.id for p in linked} and t.status != TaskStatus.DONE]
+        total_open  = [t for t in all_tasks if t.status != TaskStatus.DONE]
         if total_open:
             pct_load = len(goal_tasks) / len(total_open) * 100
             L(_t("dim", f"  Goal share of open tasks: {len(goal_tasks)}"
@@ -3362,14 +3373,15 @@ def _build_goal_alignment(goal_id: str, focus: str) -> "list[list]":
         pass
 
     try:
-        config    = storage.load_config()
-        season    = config.get("season", {}) if isinstance(config, dict) else {}
-        if season:
-            focus_dim = season.get("focus", "")
-            aligned   = focus_dim == goal.dimension
+        config = storage.load_config()
+        season_cfg = config.season
+        if season_cfg:
+            focus_dim = season_cfg.focus.value if season_cfg.focus else ""
+            aligned   = focus_dim == (goal.dimension.value if goal.dimension else "")
             L(_t("label", "  SEASONAL CONTEXT"))
-            L(_t("body",  f"  Season: {season.get('name', '—')}"))
-            L(_t("body",  f"  Focus: {focus_dim}  Secondary: {season.get('secondary', '—')}"))
+            L(_t("body",  f"  Season: {season_cfg.name or '—'}"))
+            secondary = season_cfg.secondary.value if season_cfg.secondary else "—"
+            L(_t("body",  f"  Focus: {focus_dim}  Secondary: {secondary}"))
             L(_t("done" if aligned else "dim",
                  f"  OKR alignment: {'✓ well-aligned' if aligned else '⚠ not the season focus'}"))
             B()
@@ -3388,7 +3400,7 @@ def _build_goal_alignment(goal_id: str, focus: str) -> "list[list]":
             for g in competing[:4]:
                 g_projs  = {p.id for p in all_projs if p.goal_id == g.id}
                 wk_tasks = [t for t in all_tasks if t.project_id in g_projs
-                            and not t.is_done and t.due and t.due <= week_end]
+                            and t.status != TaskStatus.DONE and t.due and t.due <= week_end]
                 L(_t("dim", f"  {g.seq_id or '·'}  {g.title[:32]}"
                             f"  {g.dimension or '—'}  {len(wk_tasks)}/wk"))
             B()
@@ -3496,7 +3508,7 @@ def _triage_session_turn(text: str, tl: str, session: dict,
         session["processed"].append({**item, "action": "rejected"})
         session["current_idx"] = idx + 1
         session.pop("pending_classify", None)
-        _session_chat("system", f"  \u00d7 Rejected.", state, app)
+        _session_chat("system", "  \u00d7 Rejected.", state, app)
         _triage_show_current(session, state, app)
 
     elif tl in ("s", "snooze"):
@@ -3924,28 +3936,34 @@ def run_dashboard() -> None:
         """Build one panel in a background thread, then invalidate the app."""
         try:
             if mode == "execute":
-                if panel == 0:   result = _build_gps(focus)
-                elif panel == 1: result = _build_strategic(focus)
-                elif panel == 2: result = _build_tactical(focus)
-                elif panel == 3: result = _build_daily(focus, staging_flag)
-                elif panel == 4: result = _build_research(state.research)
-                else:            result = []  # panel 5 inline
+                _exec_builders = {
+                    0: lambda: _build_gps(focus),
+                    1: lambda: _build_strategic(focus),
+                    2: lambda: _build_tactical(focus),
+                    3: lambda: _build_daily(focus, staging_flag),
+                    4: lambda: _build_research(state.research),
+                }
+                result = _exec_builders.get(panel, lambda: [])()
             elif mode == "project":
                 builders = [_build_proj_scope, _build_proj_tasks, _build_proj_context]
                 result = builders[panel](mode_arg or "", focus) if panel < len(builders) else []
             elif mode == "goal":
-                builders = [_build_goal_okrs, _build_goal_projects, _build_goal_alignment]
+                builders = [_build_goal_okrs, _build_goal_projects, _build_goal_alignment]  # type: ignore[list-item]
                 result = builders[panel](mode_arg or "", focus) if panel < len(builders) else []
             elif mode == "plan":
                 result = []  # Strategy panel (panel 0) is always built inline
             elif mode == "review":
-                if panel == 1:   result = _build_rev_activity(mode_arg or "weekly", focus)
-                elif panel == 2: result = _build_rev_captures(mode_arg or "weekly", focus)
-                else:            result = []  # panel 0 inline (canvas)
+                _rev_builders = {
+                    1: lambda: _build_rev_activity(mode_arg or "weekly", focus),
+                    2: lambda: _build_rev_captures(mode_arg or "weekly", focus),
+                }
+                result = _rev_builders.get(panel, lambda: [])()
             elif mode == "triage":
-                if panel == 0:   result = _build_triage_inbox(state)
-                elif panel == 1: result = _build_triage_done(state)
-                else:            result = []
+                _tri_builders = {
+                    0: lambda: _build_triage_inbox(state),
+                    1: lambda: _build_triage_done(state),
+                }
+                result = _tri_builders.get(panel, lambda: [])()
             else:
                 result = []
             _cache[key] = result
@@ -4080,7 +4098,7 @@ def run_dashboard() -> None:
             ("class:toolbar", f"   ← → panels   ↑ ↓ scroll [{pane_label}]   Tab switch pane   f dimension   i type   Esc exit  "),
         ]
 
-    def _prompt_prefix(lineno: int, wrap_count: int) -> FormattedText:
+    def _prompt_prefix(_lineno: int, wrap_count: int) -> FormattedText:
         if wrap_count > 0:
             return FormattedText([("", "  ")])
         if state.mode == "insert":
@@ -4190,7 +4208,7 @@ def run_dashboard() -> None:
         ])
     )
 
-    app = Application(
+    app: Application[None] = Application(
         layout=layout,
         key_bindings=kb,
         style=STYLE,

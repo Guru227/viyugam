@@ -4,22 +4,14 @@ Runs weekly / monthly / quarterly review sessions.
 Three phases: Reflect → Analyse → Intent.
 """
 from __future__ import annotations
+
 import json
-import os
 from typing import Literal
 
-import anthropic
-
+from viyugam.engine.client import get_client, text_of
 from viyugam.pii import redact
 
 Cadence = Literal["weekly", "monthly", "quarterly"]
-
-
-def _client() -> anthropic.Anthropic:
-    api_key = os.environ.get("ANTHROPIC_API_KEY")
-    if not api_key:
-        raise RuntimeError("ANTHROPIC_API_KEY not set.")
-    return anthropic.Anthropic(api_key=api_key)
 
 
 # ── System prompts ─────────────────────────────────────────────────────────────
@@ -125,7 +117,7 @@ def build_review_data(
         if actual_season and actual_season != season.get("focus"):
             lines.append(f"ACTUAL SEASON (derived): {actual_season} ← diverges from intended")
         else:
-            lines.append(f"ACTUAL SEASON: aligned with intended")
+            lines.append("ACTUAL SEASON: aligned with intended")
         lines.append("")
 
     # Tasks
@@ -237,7 +229,7 @@ def generate_briefing(
     """Generate the opening briefing for the review session."""
     period_map = {"weekly": "week", "monthly": "month", "quarterly": "quarter"}
     period = period_map[cadence]
-    client = _client()
+    client = get_client()
 
     extra_context = ""
     if constitution:
@@ -264,9 +256,9 @@ def generate_briefing(
         model="claude-sonnet-4-6",
         max_tokens=400,
         system=BRIEFING_SYSTEM.format(cadence=cadence, period=period),
-        messages=[{"role": "user", "content": content}],
+        messages=[{"role": "user", "content": content}],  # type: ignore[arg-type]
     )
-    return response.content[0].text.strip()
+    return text_of(response).strip()
 
 
 def review_turn(
@@ -282,7 +274,7 @@ def review_turn(
     One turn of the review conversation.
     Returns (response, is_complete).
     """
-    client = _client()
+    client = get_client()
     messages = history + [{"role": "user", "content": redact(user_message)}]
 
     system = _review_system(cadence)
@@ -295,10 +287,10 @@ def review_turn(
         model="claude-sonnet-4-6",
         max_tokens=600,
         system=system,
-        messages=messages,
+        messages=messages,  # type: ignore[arg-type]
     )
 
-    text = response.content[0].text.strip()
+    text = text_of(response).strip()
     complete = "[REVIEW_COMPLETE]" in text
     clean = text.replace("[REVIEW_COMPLETE]", "").strip()
     return clean, complete
@@ -318,12 +310,12 @@ def generate_review_summary(
         for m in conversation
     )
 
-    client = _client()
+    client = get_client()
     response = client.messages.create(
         model="claude-sonnet-4-6",
         max_tokens=800,
         system="You generate structured JSON summaries of review conversations. Return only valid JSON.",
-        messages=[{
+        messages=[{  # type: ignore[arg-type]
             "role": "user",
             "content": REVIEW_SUMMARY_SYSTEM.format(
                 date=today,
@@ -333,7 +325,7 @@ def generate_review_summary(
         }],
     )
 
-    text = response.content[0].text.strip()
+    text = text_of(response).strip()
     if text.startswith("```"):
         text = text.split("\n", 1)[1].rsplit("```", 1)[0].strip()
     summary = json.loads(text)
@@ -375,7 +367,7 @@ def generate_weekly_letter(
     constitution: str = "",
     memory_context: str = "",
 ) -> str:
-    client = _client()
+    client = get_client()
     # review_data may be a dict or pre-formatted string
     if isinstance(review_data, str):
         review_data_str = review_data[:3000]
@@ -399,9 +391,9 @@ Write the weekly letter."""
         model="claude-sonnet-4-6",
         max_tokens=800,
         system=WEEKLY_LETTER_SYSTEM,
-        messages=[{"role": "user", "content": content}],
+        messages=[{"role": "user", "content": content}],  # type: ignore[arg-type]
     )
-    return response.content[0].text.strip()
+    return text_of(response).strip()
 
 
 OKR_SYSTEM = """You are a strategic planning agent. Given a quarterly review and the user's goals,
@@ -434,7 +426,7 @@ def generate_okrs(
     season_focus: str = "",
     constitution: str = "",
 ) -> list[dict]:
-    client = _client()
+    client = get_client()
     content = f"""Current quarter: {current_quarter}
 Planning for: {next_quarter}
 Season focus: {season_focus or 'not set'}
@@ -453,9 +445,9 @@ Active goals:
         model="claude-sonnet-4-6",
         max_tokens=1500,
         system=system,
-        messages=[{"role": "user", "content": content}],
+        messages=[{"role": "user", "content": content}],  # type: ignore[arg-type]
     )
-    text = response.content[0].text.strip()
+    text = text_of(response).strip()
     if text.startswith("```"):
         text = text.split("\n", 1)[1].rsplit("```", 1)[0].strip()
     return json.loads(text)
@@ -528,7 +520,7 @@ def retro_turn(
     review_data: dict,
 ) -> tuple[str, bool]:
     """One turn of retrospective phase. Returns (response, is_complete)."""
-    client = _client()
+    client = get_client()
     system = RETRO_SYSTEM.format(scope=scope)
     messages = list(history)
     messages.append({"role": "user", "content": redact(user_message)})
@@ -536,9 +528,9 @@ def retro_turn(
         model="claude-sonnet-4-6",
         max_tokens=800,
         system=system,
-        messages=messages,
+        messages=messages,  # type: ignore[arg-type]
     )
-    text = response.content[0].text.strip()
+    text = text_of(response).strip()
     complete = "[PHASE_COMPLETE]" in text
     text = text.replace("[PHASE_COMPLETE]", "").strip()
     return text, complete
@@ -562,7 +554,7 @@ def dim_journal_turn(
     prior_summaries: dict | None = None,
 ) -> tuple[str, bool]:
     """One turn of per-dimension journal. Returns (response, is_complete)."""
-    client = _client()
+    client = get_client()
     prior_context = ""
     if prior_summaries:
         relevant = {k: v for k, v in prior_summaries.items() if v != "skipped"}
@@ -580,9 +572,9 @@ def dim_journal_turn(
         model="claude-sonnet-4-6",
         max_tokens=400,
         system=system,
-        messages=messages,
+        messages=messages,  # type: ignore[arg-type]
     )
-    text = response.content[0].text.strip()
+    text = text_of(response).strip()
     complete = "[PHASE_COMPLETE]" in text
     text = text.replace("[PHASE_COMPLETE]", "").strip()
     return text, complete
@@ -590,7 +582,7 @@ def dim_journal_turn(
 
 def synthesize_dim_journal(history: list[dict], dimension: str, scope: str, today: str) -> str:
     """Synthesise a dimension journal conversation into a markdown entry."""
-    client = _client()
+    client = get_client()
     history_text = "\n".join(
         f"{'Reviewer' if m['role']=='assistant' else 'You'}: {m['content']}"
         for m in history
@@ -599,9 +591,9 @@ def synthesize_dim_journal(history: list[dict], dimension: str, scope: str, toda
         model="claude-sonnet-4-6",
         max_tokens=300,
         system=f"You are synthesising a {dimension} journal entry from a {scope} review conversation. Write 2-3 sentences capturing the essence. No preamble.",
-        messages=[{"role": "user", "content": f"Date: {today}\nConversation:\n{history_text}"}],
+        messages=[{"role": "user", "content": f"Date: {today}\nConversation:\n{history_text}"}],  # type: ignore[arg-type]
     )
-    return response.content[0].text.strip()
+    return text_of(response).strip()
 
 
 def extract_review_tasks(dim_summaries: dict) -> dict:
@@ -614,7 +606,7 @@ def extract_review_tasks(dim_summaries: dict) -> dict:
     if not dim_summaries:
         return {"new_tasks": [], "completed_hints": []}
 
-    client = _client()
+    client = get_client()
     combined = "\n\n".join(
         f"[{dim.upper()}]\n{summary}"
         for dim, summary in dim_summaries.items()
@@ -646,9 +638,9 @@ Rules:
             model="claude-sonnet-4-6",
             max_tokens=400,
             system=system,
-            messages=[{"role": "user", "content": f"Journal summaries:\n\n{combined}"}],
+            messages=[{"role": "user", "content": f"Journal summaries:\n\n{combined}"}],  # type: ignore[arg-type]
         )
-        text = response.content[0].text.strip()
+        text = text_of(response).strip()
         # Strip markdown code fences if present
         if text.startswith("```"):
             text = text.split("```")[1]

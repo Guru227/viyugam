@@ -4,18 +4,10 @@ A focused 3-5 exchange conversation to understand a captured triage item
 before classifying it. Output: a summary used as the entity's description.
 """
 from __future__ import annotations
+
 import json
-import os
 
-import anthropic
-
-
-def _client() -> anthropic.Anthropic:
-    api_key = os.environ.get("ANTHROPIC_API_KEY")
-    if not api_key:
-        raise RuntimeError("ANTHROPIC_API_KEY not set.")
-    return anthropic.Anthropic(api_key=api_key)
-
+from viyugam.engine.client import get_client, text_of
 
 TRIAGE_DEBATE_SYSTEM = """\
 You are helping the user understand and clarify a captured idea, thought, or task.
@@ -55,14 +47,14 @@ def start_debate(item: dict, context: str,
     if context:
         user_msg += f"\nExtra context: {context}"
 
-    client   = _client()
+    client   = get_client()
     response = client.messages.create(
         model="claude-sonnet-4-6",
         max_tokens=400,
         system=TRIAGE_DEBATE_SYSTEM,
-        messages=[{"role": "user", "content": user_msg}],
+        messages=[{"role": "user", "content": user_msg}],  # type: ignore[arg-type]
     )
-    return response.content[0].text.strip()
+    return text_of(response).strip()
 
 
 def debate_turn(history: list[dict], user_message: str,
@@ -76,14 +68,14 @@ def debate_turn(history: list[dict], user_message: str,
     is_done = any(kw in tl for kw in DONE_KW)
 
     messages = list(history) + [{"role": "user", "content": user_message}]
-    client   = _client()
+    client   = get_client()
     response = client.messages.create(
         model="claude-sonnet-4-6",
         max_tokens=400,
         system=TRIAGE_DEBATE_SYSTEM,
-        messages=messages,
+        messages=messages,  # type: ignore[arg-type]
     )
-    reply = response.content[0].text.strip()
+    reply = text_of(response).strip()
     return reply, is_done
 
 
@@ -102,13 +94,13 @@ def extract_debate_summary(history: list[dict], item: dict) -> str:
         "Write it as if describing the item itself — not as a summary of the conversation. "
         "Be concrete. Mention what it is, why it matters, and what action it implies if clear."
     )
-    client   = _client()
+    client   = get_client()
     response = client.messages.create(
         model="claude-sonnet-4-6",
         max_tokens=300,
-        messages=[{"role": "user", "content": extraction_prompt}],
+        messages=[{"role": "user", "content": extraction_prompt}],  # type: ignore[arg-type]
     )
-    return response.content[0].text.strip()
+    return text_of(response).strip()
 
 
 def decompose_capture(item: dict, history: list[dict] | None = None) -> list[str]:
@@ -140,13 +132,13 @@ def decompose_capture(item: dict, history: list[dict] | None = None) -> list[str
         "Example: [\"Buy running shoes\", \"Research trail routes\", \"Schedule long run\"]"
     )
 
-    client   = _client()
+    client   = get_client()
     response = client.messages.create(
         model="claude-sonnet-4-6",
         max_tokens=600,
-        messages=[{"role": "user", "content": prompt}],
+        messages=[{"role": "user", "content": prompt}],  # type: ignore[arg-type]
     )
-    text = response.content[0].text.strip()
+    text = text_of(response).strip()
     if text.startswith("```"):
         text = text.split("\n", 1)[1].rsplit("```", 1)[0].strip()
     try:

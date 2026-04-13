@@ -3,22 +3,11 @@ agents/intent.py — Intent classifier for the natural language REPL.
 classify_intent(text, context_summary) -> list[dict]
 """
 from __future__ import annotations
+
 import json
-import os
 
-import anthropic
-
+from viyugam.engine.client import get_client, text_of
 from viyugam.pii import redact
-
-
-def _client() -> anthropic.Anthropic:
-    api_key = os.environ.get("ANTHROPIC_API_KEY")
-    if not api_key:
-        raise RuntimeError(
-            "ANTHROPIC_API_KEY not set. Add it to your environment or ~/.viyugam/config.yaml"
-        )
-    return anthropic.Anthropic(api_key=api_key)
-
 
 INTENT_SYSTEM = """You are the intent router for Viyugam, a personal Life OS.
 Your sole job: classify natural language input into one or more structured actions.
@@ -114,15 +103,15 @@ def classify_intent(text: str, context_summary: str = "") -> list[dict]:
     """
     user_content = f"CONTEXT:\n{context_summary}\n\nUSER INPUT: {text}" if context_summary else f"USER INPUT: {text}"
 
-    client = _client()
+    client = get_client()
     response = client.messages.create(
         model="claude-sonnet-4-6",
         max_tokens=2048,
         system=INTENT_SYSTEM,
-        messages=[{"role": "user", "content": redact(user_content)}],
+        messages=[{"role": "user", "content": redact(user_content)}],  # type: ignore[arg-type]
     )
 
-    raw = response.content[0].text.strip()
+    raw = text_of(response).strip()
     if raw.startswith("```"):
         raw = raw.split("\n", 1)[1].rsplit("```", 1)[0].strip()
 
